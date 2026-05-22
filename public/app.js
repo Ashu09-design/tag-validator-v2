@@ -897,9 +897,15 @@ document.addEventListener('DOMContentLoaded', () => {
     async function refreshGroqState() {
         try {
             const d = await (await fetch('/api/ai/config')).json();
-            document.getElementById('groqState').innerHTML = d.configured
-                ? '✅ API key saved — assistant is ready.'
-                : '⚠ No Groq key yet — add one to use the assistant.';
+            const el = document.getElementById('groqState');
+            if (!d.configured) {
+                el.innerHTML = '⚠ No API key yet — add a Groq and/or Gemini key.';
+            } else {
+                const parts = [];
+                if (d.groq) parts.push('Groq ✅');
+                if (d.gemini) parts.push('Gemini ✅ (fallback)');
+                el.innerHTML = 'Assistant ready — ' + parts.join(' · ');
+            }
         } catch { /* ignore */ }
     }
 
@@ -946,18 +952,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('saveGroqBtn').onclick = async () => {
         const apiKey = document.getElementById('groqKeyInput').value.trim();
-        if (!apiKey) return;
+        const geminiKey = document.getElementById('geminiKeyInput').value.trim();
+        if (!apiKey && !geminiKey) return;
+        const body = {};
+        if (apiKey) body.apiKey = apiKey;
+        if (geminiKey) body.geminiKey = geminiKey;
         const r = await fetch('/api/ai/config', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ apiKey }),
+            body: JSON.stringify(body),
         });
         document.getElementById('groqKeyInput').value = '';
+        document.getElementById('geminiKeyInput').value = '';
         if (r.ok) document.getElementById('chatSettings').classList.remove('open');
         refreshGroqState();
     };
     document.getElementById('clearGroqBtn').onclick = async () => {
         await fetch('/api/ai/config', { method: 'DELETE' });
         document.getElementById('groqKeyInput').value = '';
+        document.getElementById('geminiKeyInput').value = '';
         refreshGroqState();
     };
 

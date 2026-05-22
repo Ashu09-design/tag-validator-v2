@@ -12,6 +12,12 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // models frequently leak malformed function-call text that the API rejects.
 const GROQ_MODEL = 'openai/gpt-oss-120b';
 
+// Fallback provider: Google Gemini via its OpenAI-compatible endpoint, so the
+// exact same request/response shape works. Used automatically when Groq is
+// rate-limited or unavailable.
+const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+const GEMINI_MODEL = 'gemini-2.0-flash';
+
 module.exports = function registerAiRoutes(app, ctx) {
     const ROOT = ctx.rootDir;
     const AI_CONFIG_FILE = path.join(ROOT, 'ai_config.json');
@@ -24,7 +30,7 @@ module.exports = function registerAiRoutes(app, ctx) {
     // Only one AI-triggered Python job at a time.
     let aiBusy = false;
 
-    // ---- Groq API key ----
+    // ---- API keys (Groq primary, Gemini fallback) ----
     function loadConfig() {
         if (fs.existsSync(AI_CONFIG_FILE)) {
             try { return JSON.parse(fs.readFileSync(AI_CONFIG_FILE, 'utf8')) || {}; }
@@ -36,19 +42,29 @@ module.exports = function registerAiRoutes(app, ctx) {
         const c = loadConfig();
         return (String(c.apiKey || process.env.GROQ_API_KEY || '').trim()) || null;
     }
+    function loadGeminiKey() {
+        const c = loadConfig();
+        return (String(c.geminiKey || process.env.GEMINI_API_KEY || '').trim()) || null;
+    }
 
     app.get('/api/ai/config', (req, res) => {
-        res.json({ configured: !!loadGroqKey() });
+        res.json({
+            configured: !!(loadGroqKey() || loadGeminiKey()),
+            groq: !!loadGroqKey(),
+            gemini: !!loadGeminiKey(),
+        });
     });
 
     app.post('/api/ai/config', (req, res) => {
-        const { apiKey } = req.body || {};
-        if (typeof apiKey !== 'string' || !apiKey.trim())
-            return res.status(400).json({ error: 'Groq API key required' });
+        const { apiKey, geminiKey } = req.body || {};
+        if ((typeof apiKey !== 'string' || !apiKey.trim()) &&
+            (typeof geminiKey !== 'string' || !geminiKey.trim()))
+            return res.status(400).json({ error: 'Provide a Groq and/or Gemini API key' });
         const c = loadConfig();
-        c.apiKey = apiKey.trim();
+        if (typeof apiKey === 'string' && apiKey.trim()) c.apiKey = apiKey.trim();
+        if (typeof geminiKey === 'string' && geminiKey.trim()) c.geminiKey = geminiKey.trim();
         fs.writeFileSync(AI_CONFIG_FILE, JSON.stringify(c, null, 2));
-        res.json({ success: true, configured: !!loadGroqKey() });
+        res.json({ success: true, groq: !!loadGroqKey(), gemini: !!loadGeminiKey() });
     });
 
     app.delete('/api/ai/config', (req, res) => {
@@ -263,12 +279,13 @@ Be helpful, accurate, and human.`;
         return calls;
     }
 
-    async function callGroq(apiKey, messages, signal) {
-        const resp = await fetch(GROQ_URL, {
+    // One LLM call against a single provider (OpenAI-compatible endpoint).
+    async function callProvider(provider, messages, signal) {
+        const resp = await fetch(provider.url, {
             method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+            headers: { 'Authorization': 'Bearer ' + provider.key, 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                model: GROQ_MODEL,
+                model: provider.model,
                 messages,
                 tools: TOOLS,
                 tool_choice: 'auto',
@@ -279,33 +296,54 @@ Be helpful, accurate, and human.`;
         });
         if (!resp.ok) {
             const body = await resp.text().catch(() => '');
-            if (resp.status === 401) throw new Error('Groq rejected the API key — check it in AI Settings.');
-            if (resp.status === 429) throw new Error('Groq rate limit hit — wait a moment and retry.');
-            // 'tool_use_failed': the model emitted a malformed function call.
-            // Recover the intended call(s) from failed_generation.
+            // 'tool_use_failed' (Groq/Llama): model emitted a malformed function
+            // call — recover the intended call(s) from failed_generation.
             if (resp.status === 400) {
                 let parsed = {};
                 try { parsed = JSON.parse(body); } catch { /* ignore */ }
                 const fg = parsed && parsed.error && parsed.error.failed_generation;
                 if (fg) {
                     const calls = parseLeakedToolCalls(fg);
-                    if (calls.length) {
+                    if (calls.length)
                         return { choices: [{ message: { role: 'assistant', content: '', tool_calls: calls } }] };
-                    }
-                    // No parseable call — treat the text as the reply.
                     const clean = cleanReply(fg);
                     if (clean) return { choices: [{ message: { role: 'assistant', content: clean } }] };
                 }
             }
-            throw new Error(`Groq API error ${resp.status}: ${body.slice(0, 300)}`);
+            if (resp.status === 401)
+                throw new Error(`${provider.name} rejected the API key — check it in AI Settings.`);
+            if (resp.status === 429)
+                throw new Error(`${provider.name} rate limit hit.`);
+            throw new Error(`${provider.name} API error ${resp.status}: ${body.slice(0, 200)}`);
         }
         return resp.json();
     }
 
+    // Try Groq first; automatically fall back to Gemini when Groq is
+    // rate-limited or otherwise failing. Whichever keys are set get used.
+    async function callLLM(messages, signal) {
+        const providers = [];
+        const gk = loadGroqKey();
+        if (gk) providers.push({ name: 'Groq', url: GROQ_URL, model: GROQ_MODEL, key: gk });
+        const gm = loadGeminiKey();
+        if (gm) providers.push({ name: 'Gemini', url: GEMINI_URL, model: GEMINI_MODEL, key: gm });
+        if (!providers.length) throw new Error('No LLM API key set.');
+
+        let lastErr;
+        for (const provider of providers) {
+            try {
+                return await callProvider(provider, messages, signal);
+            } catch (e) {
+                if (e && e.name === 'AbortError') throw e;   // user cancelled
+                lastErr = e;   // this provider failed — try the next one
+            }
+        }
+        throw lastErr || new Error('All LLM providers failed.');
+    }
+
     app.post('/api/ai/chat', async (req, res) => {
-        const apiKey = loadGroqKey();
-        if (!apiKey)
-            return res.status(400).json({ error: 'Groq API key not set. Open AI Settings and add your key.' });
+        if (!loadGroqKey() && !loadGeminiKey())
+            return res.status(400).json({ error: 'No API key set. Open AI Settings and add a Groq and/or Gemini key.' });
         if (aiBusy)
             return res.status(409).json({ error: 'The assistant is already running an audit. Please wait for it to finish.' });
 
@@ -319,24 +357,24 @@ Be helpful, accurate, and human.`;
 
         const messages = [{ role: 'system', content: SYSTEM_PROMPT }, ...clean];
 
-        // If the user cancels (client disconnects), abort the Groq call and
+        // If the user cancels (client disconnects), abort the LLM call and
         // bail out of the loop so the assistant is free again immediately.
         // NOTE: listen on `res` — `req` 'close' fires as soon as the body is
         // consumed by express.json(), which is not a client disconnect.
         let clientGone = false;
-        const groqAbort = new AbortController();
+        const llmAbort = new AbortController();
         res.on('close', () => {
-            if (!res.writableEnded) { clientGone = true; groqAbort.abort(); }
+            if (!res.writableEnded) { clientGone = true; llmAbort.abort(); }
         });
 
         aiBusy = true;
         try {
             for (let turn = 0; turn < 6; turn++) {
                 if (clientGone) return;
-                const data = await callGroq(apiKey, messages, groqAbort.signal);
+                const data = await callLLM(messages, llmAbort.signal);
                 if (clientGone) return;
                 const msg = data.choices && data.choices[0] && data.choices[0].message;
-                if (!msg) throw new Error('Empty response from Groq.');
+                if (!msg) throw new Error('Empty response from the model.');
                 messages.push(msg);
 
                 if (!msg.tool_calls || !msg.tool_calls.length) {
