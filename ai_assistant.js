@@ -108,7 +108,7 @@ module.exports = function registerAiRoutes(app, ctx) {
 
         [AI_RESULTS, AI_RESULTS_JSON].forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
 
-        const m = ['tealium', 'ga4', 'pixels'].includes(mode) ? mode : 'tealium';
+        const m = ['tealium', 'ga4', 'pixels', 'full'].includes(mode) ? mode : 'full';
         const { code, out } = await runPython([
             'bulk_tag_validator.py', '--mode', m,
             '--input', AI_INPUT, '--output', AI_RESULTS, '--json-out', AI_RESULTS_JSON,
@@ -131,16 +131,21 @@ module.exports = function registerAiRoutes(app, ctx) {
             function: {
                 name: 'validate_tags',
                 description: 'Run a live browser tag audit on one or more web page URLs. '
-                    + 'mode "tealium" checks Tealium + Adobe Analytics (report suite, page-view tag). '
-                    + 'mode "ga4" checks Google Tag Manager (GTM ID) + GA4 (measurement ID, page-view event). '
+                    + 'mode "full" (DEFAULT — use this for almost everything) detects EVERYTHING in one pass: '
+                    + 'HTTP status code (e.g. 200/404), the website CMS/platform, Tealium (account/profile/env), '
+                    + 'Adobe Analytics (report suite, page-view), GTM (GTM ID), and GA4 (measurement ID, page_view). '
+                    + 'Use "full" whenever the user gives a URL and asks anything general — what analytics it uses, '
+                    + 'whether GA4/GTM/Adobe/Tealium is there, page-view tags, CMS, HTTP errors — so you never have to guess. '
                     + 'mode "pixels" checks marketing/advertising pixels across 5 OneTrust consent scenarios '
                     + '(Accept All, Reject All, Performance, Functional, Targeting) with fire counts, pixel IDs and source. '
-                    + 'Slow: ~30-60s per URL for tealium/ga4, ~2-3 min per URL for pixels.',
+                    + 'modes "tealium" / "ga4" are narrow legacy modes — prefer "full". '
+                    + 'Slow: ~30-60s per URL for full/tealium/ga4, ~2-3 min per URL for pixels.',
                 parameters: {
                     type: 'object',
                     properties: {
                         urls: { type: 'array', items: { type: 'string' }, description: 'Page URLs to audit.' },
-                        mode: { type: 'string', enum: ['tealium', 'ga4', 'pixels'], description: 'Audit type.' },
+                        mode: { type: 'string', enum: ['full', 'pixels', 'tealium', 'ga4'],
+                            description: 'Audit type. Use "full" unless the user specifically wants marketing pixels.' },
                     },
                     required: ['urls', 'mode'],
                 },
@@ -199,15 +204,24 @@ STYLE — talk like a real human in a chat, not a formal assistant:
 - Never invent data. If you don't know, just say so plainly.
 
 TOOLS:
-- validate_tags(urls, mode): live browser audit. mode "ga4" = GTM ID + GA4 (Measurement ID, page_view); mode "tealium" = Tealium account/profile/env + Adobe (Report Suite, page-view); mode "pixels" = marketing pixels across 5 consent scenarios (Accept All, Reject All, Performance, Functional, Targeting) with fire counts/IDs/source.
+- validate_tags(urls, mode): live browser audit.
+  - mode "full" (DEFAULT): one pass detects HTTP status code, CMS/platform, Tealium (account/profile/env), Adobe (Report Suite, page-view), GTM (GTM ID), GA4 (Measurement ID, page_view). Use this for ANY general question about a URL.
+  - mode "pixels": marketing pixels across 5 consent scenarios (Accept All, Reject All, Performance, Functional, Targeting) with fire counts/IDs/source.
 - crawl_domain(url, max_pages): discover every same-domain page URL.
 
-TOOL ROUTING:
-- "Is GA4/GTM here?" / Measurement ID -> validate_tags "ga4". "Is Adobe/Tealium here?" / Report Suite -> validate_tags "tealium". Page_view question -> validate_tags (call twice, ga4+tealium, to cover both). Pixels/consent/compliance -> validate_tags "pixels", read pixel_scenarios.
+TOOL ROUTING — auto-detect, never guess:
+- User gives a URL and asks ANYTHING general (what analytics it uses, is GA4/GTM/Adobe/Tealium there, Measurement ID, Report Suite, page_view, CMS, HTTP errors) -> validate_tags mode "full". ONE call detects everything — so never say "GA4 isn't here" without checking; the same call already tells you if it's a Tealium or Adobe site instead.
+- Marketing pixels / consent / compliance -> validate_tags mode "pixels", read pixel_scenarios.
 - "All page URLs of this site" -> crawl_domain, then share [Download Excel](/api/ai/download/crawled). After validate_tags offer [Download Report](/api/ai/download/results).
 - Pure how-to / concept questions -> answer from your own expertise, no tool needed.
 
-RESULTS: "PASS" = detected/firing, "FAIL" = not detected. Always quote concrete values (G-XXXX, GTM-XXXX, report suite, fire counts). pixels Compliance "FAIL" = pixels fired even after Reject All (consent violation).
+ANSWERING — give the user exactly what they asked, from the "full" result:
+- "Does page_view fire?" -> answer the page-view status only (GA4_PageView and/or Adobe_PageView, whichever the site actually uses). Don't dump GTM/Tealium/Adobe details they didn't ask for.
+- "Is GA4 here?" -> answer about GA4. But if GA4 is absent and the site clearly uses Tealium or Adobe instead, mention that helpfully in one line ("No GA4 — but this site runs Tealium").
+- Mention the CMS and HTTP status when relevant (e.g. flag a 404/500, or note "Built on WordPress").
+- For a pixels question about ONE specific scenario (e.g. "Accept All"), report ONLY that scenario from pixel_scenarios — not all five.
+
+RESULTS: "PASS" = detected/firing, "FAIL" = not detected. Quote concrete values (G-XXXX, GTM-XXXX, report suite, fire counts, HTTP status, CMS name). HTTP_Status 200 = OK; 404/500 etc = an error worth flagging. pixels Compliance "FAIL" = pixels fired even after Reject All (consent violation).
 
 TROUBLESHOOTING: When asked "how do I fix X", give the most likely fix first in plain language, with a quick concrete example. Add more steps only if the problem needs them — don't list every possible cause by default. Useful knowledge to draw on: GA4 tag in GTM with the right Measurement ID (e.g. G-ABC123XYZ); trigger "Initialization - All Pages"; container published; snippet in <head>; verify in GA4 DebugView / the network call to google-analytics.com/g/collect; consent mode (a CMP blocking analytics storage stops hits); SPAs need a History Change trigger for page_view; Adobe report suite lives in s.account / the Launch Analytics extension.
 

@@ -351,9 +351,46 @@ def parse_analytics_payload(url, post_data=""):
 
     return result
 
+# CMS / website-platform signatures. Generator meta is most reliable; the
+# rest are markers found in the page HTML or its resource URLs.
+CMS_SIGNATURES = [
+    ("Shopify", ["cdn.shopify.com", "myshopify.com", "shopifycloud", "shopify.theme"]),
+    ("WordPress", ["/wp-content/", "/wp-includes/", "wp-json", "wp-emoji"]),
+    ("Wix", ["static.wixstatic.com", "wixsite.com", "_wix", "wix.com/"]),
+    ("Squarespace", ["squarespace.com", "static1.squarespace", "sqsp.net"]),
+    ("Drupal", ["/sites/default/files", "drupal-settings-json", "/core/misc/drupal"]),
+    ("Joomla", ["/media/jui/", "/components/com_", "joomla"]),
+    ("Webflow", ["assets.website-files.com", "webflow.js", ".webflow.io"]),
+    ("HubSpot CMS", ["hs-scripts.com", "hubspotusercontent", "hsappstatic.net"]),
+    ("Adobe Experience Manager", ["/etc.clientlibs/", "/content/dam/", "/etc/designs/"]),
+    ("Magento", ["/static/version", "/pub/static/", "mage/cookies"]),
+    ("Sitecore", ["/-/media/", "/sitecore/", "sitecore"]),
+    ("Contentful", ["images.ctfassets.net", "contentful"]),
+    ("Ghost", ["/ghost/", "ghost-sdk"]),
+    ("BigCommerce", ["bigcommerce.com", "/stencil/"]),
+    ("Framer", ["framerusercontent.com"]),
+    ("Duda", ["dudamobile.com", "duda_infra"]),
+]
+CMS_GENERATORS = ["wordpress", "shopify", "wix", "squarespace", "drupal", "joomla",
+                  "webflow", "hubspot", "ghost", "duda", "sitecore", "magento"]
+
+
+def classify_cms(generator, html, urls):
+    """Best-effort detection of the CMS / website builder behind a page."""
+    gen = (generator or "").lower()
+    for g in CMS_GENERATORS:
+        if g in gen:
+            return generator.strip()[:60]
+    combined = (html or "").lower() + " " + " ".join(urls or []).lower()
+    for name, sigs in CMS_SIGNATURES:
+        if any(s in combined for s in sigs):
+            return name
+    return "Unknown / Custom"
+
+
 async def validate_tags(browser, url, index, total):
     results = {
-        "URL": url,
+        "URL": url, "HTTP_Status": "", "CMS": "",
         "Tealium_Loaded": "FAIL", "Tealium_Account": "", "Tealium_Profile": "", "Tealium_Env": "",
         "GTM_Loaded": "FAIL", "GTM_ID": "",
         "GA4_Fired": "FAIL", "GA4_Measurement_ID": "", "GA4_PageView": "FAIL",
@@ -420,7 +457,9 @@ async def validate_tags(browser, url, index, total):
         sys.stdout.flush()
 
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if resp is not None:
+                results["HTTP_Status"] = resp.status
         except Exception as e:
             results["Error"] = "Timeout" if "Timeout" in str(e) else str(e)[:80]
 
@@ -472,6 +511,21 @@ async def validate_tags(browser, url, index, total):
                     if k.startswith("GTM-"): gtm_ids.add(k)
                     if k.startswith("G-"): ga4_ids.add(k); flags["ga4"] = True
             if js_data.get("dl_pv"): flags["ga4_pv"] = True
+        except: pass
+
+        # --- CMS / platform detection ---
+        try:
+            cms_data = await page.evaluate("""
+                (() => {
+                    const m = document.querySelector('meta[name="generator"]');
+                    const gen = (m && m.content) || '';
+                    const html = document.documentElement.outerHTML.slice(0, 250000);
+                    let urls = [];
+                    try { urls = performance.getEntriesByType('resource').map(r => r.name).slice(0, 400); } catch (e) {}
+                    return { gen, html, urls };
+                })()
+            """)
+            results["CMS"] = classify_cms(cms_data.get("gen", ""), cms_data.get("html", ""), cms_data.get("urls", []))
         except: pass
 
         # BUILD RESULTS
@@ -738,6 +792,13 @@ async def main():
         for sc in SCENARIOS:
             cols += [f'{sc}_Count', f'{sc}_Pixels']
         cols += ['Compliance', 'Error']
+    elif args.mode == 'full':
+        # Used only by the AI assistant — every signal in one pass so it can
+        # auto-detect whatever the site actually uses.
+        cols = ['URL', 'HTTP_Status', 'CMS',
+                'Tealium_Loaded', 'Tealium_Account', 'Tealium_Profile', 'Tealium_Env',
+                'GTM_Loaded', 'GTM_ID', 'GA4_Fired', 'GA4_Measurement_ID', 'GA4_PageView',
+                'Adobe_Loaded', 'Adobe_ReportSuite', 'Adobe_PageView', 'Error']
     else: cols = res_df.columns
     res_df[[c for c in cols if c in res_df.columns]].to_excel(output_file, index=False)
 

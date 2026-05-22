@@ -850,7 +850,6 @@ async function sendChatMessage(text) {
     if (!text || chatSending) return;
     chatSending = true;
     setChatSendMode(true);
-    document.getElementById('chatSuggests').style.display = 'none';
 
     addChatMessage('user', text);
     chatHistory.push({ role: 'user', content: text });
@@ -930,8 +929,6 @@ document.addEventListener('DOMContentLoaded', () => {
         bubble.onclick = openChat;
         const bc = document.getElementById('chatBubbleClose');
         if (bc) bc.onclick = (e) => { e.stopPropagation(); hideBubble(); };
-        // auto-dismiss the greeting bubble after a while if untouched
-        setTimeout(hideBubble, 12000);
     }
     document.getElementById('chatCloseBtn').onclick = () => {
         panel.classList.remove('open');
@@ -940,7 +937,6 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('chatClearBtn').onclick = () => {
         chatHistory = [];
         document.getElementById('chatBody').innerHTML = '';
-        document.getElementById('chatSuggests').style.display = 'flex';
         greet();
     };
     document.getElementById('chatSettingsBtn').onclick = () => {
@@ -978,8 +974,5 @@ document.addEventListener('DOMContentLoaded', () => {
     input.addEventListener('input', () => {
         input.style.height = '42px';
         input.style.height = Math.min(input.scrollHeight, 100) + 'px';
-    });
-    document.querySelectorAll('.chat-chip').forEach(chip => {
-        chip.onclick = () => sendChatMessage(chip.innerText);
     });
 });
