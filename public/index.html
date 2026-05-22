@@ -280,6 +280,134 @@
         [data-theme="light"] .val-teal { color:#0d9488; }
         [data-theme="light"] .val-adobe { color:#c2410c; }
         [data-theme="light"] .mono { color:#7c3aed; }
+
+        /* ===== AI Assistant chat widget ===== */
+        .chat-fab {
+            position: fixed; bottom: 24px; right: 24px; z-index: 200;
+            width: 60px; height: 60px; border-radius: 50%; border: none; cursor: pointer;
+            background: linear-gradient(135deg, #8b5cf6, #ec4899); color: #fff;
+            font-size: 1.6rem; box-shadow: 0 8px 24px var(--accent-glow);
+            display: flex; align-items: center; justify-content: center;
+            transition: transform 0.25s ease;
+        }
+        .chat-fab:hover { transform: scale(1.08); }
+        .chat-fab.hidden { display: none; }
+        /* attention pulse ring */
+        .chat-fab::after {
+            content: ''; position: absolute; inset: 0; border-radius: 50%;
+            border: 2px solid #ec4899; animation: fabPulse 2.2s infinite ease-out;
+        }
+        @keyframes fabPulse {
+            0% { transform: scale(1); opacity: 0.7; }
+            100% { transform: scale(1.7); opacity: 0; }
+        }
+
+        /* greeting bubble next to the FAB */
+        .chat-bubble {
+            position: fixed; bottom: 40px; right: 96px; z-index: 200;
+            max-width: 230px; padding: 12px 16px; border-radius: 16px 16px 4px 16px;
+            background: linear-gradient(135deg, #8b5cf6, #ec4899); color: #fff;
+            font-size: 0.85rem; font-weight: 500; line-height: 1.4; cursor: pointer;
+            box-shadow: 0 8px 24px var(--accent-glow);
+            animation: bubbleIn 0.5s ease both, bubbleFloat 3s ease-in-out infinite 0.5s;
+        }
+        .chat-bubble.hidden { display: none; }
+        .chat-bubble .bub-close {
+            position: absolute; top: -8px; left: -8px; width: 20px; height: 20px;
+            border-radius: 50%; background: var(--card-bg); border: 1px solid var(--border);
+            color: var(--text); font-size: 0.7rem; display: flex; align-items: center;
+            justify-content: center; cursor: pointer;
+        }
+        .chat-bubble::after {
+            content: ''; position: absolute; right: -7px; bottom: 10px;
+            border: 7px solid transparent; border-left-color: #ec4899; border-right: 0;
+        }
+        @keyframes bubbleIn {
+            0% { opacity: 0; transform: translateY(12px) scale(0.85); }
+            100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes bubbleFloat {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-6px); }
+        }
+
+        .chat-panel {
+            position: fixed; bottom: 24px; right: 24px; z-index: 201;
+            width: 400px; max-width: calc(100vw - 32px);
+            height: 600px; max-height: calc(100vh - 48px);
+            display: none; flex-direction: column; overflow: hidden;
+            border-radius: 18px;
+        }
+        .chat-panel.open { display: flex; animation: fadeIn 0.3s ease; }
+
+        .chat-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 14px 18px; border-bottom: 1px solid var(--border);
+            background: linear-gradient(135deg, rgba(139,92,246,0.25), rgba(236,72,153,0.2));
+        }
+        .chat-header .ttl { font-weight: 700; font-size: 0.95rem; display:flex; align-items:center; gap:8px; }
+        .chat-header .dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 8px #4ade80; }
+        .chat-header-btns { display: flex; gap: 6px; }
+        .chat-icon-btn {
+            background: var(--inset-bg); border: 1px solid var(--border); color: var(--text);
+            width: 30px; height: 30px; border-radius: 8px; cursor: pointer; font-size: 0.9rem;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .chat-icon-btn:hover { border-color: var(--accent); }
+
+        .chat-body {
+            flex: 1; overflow-y: auto; padding: 16px; display: flex;
+            flex-direction: column; gap: 12px; background: var(--inset-bg-soft);
+        }
+        .chat-body::-webkit-scrollbar { width: 7px; }
+        .chat-body::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; }
+
+        .chat-msg { max-width: 88%; padding: 10px 14px; border-radius: 14px; font-size: 0.85rem; line-height: 1.5; word-wrap: break-word; }
+        .chat-msg.user { align-self: flex-end; background: linear-gradient(135deg, #8b5cf6, #ec4899); color: #fff; border-bottom-right-radius: 4px; }
+        .chat-msg.bot { align-self: flex-start; background: var(--card-bg); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+        .chat-msg.bot a { color: #a78bfa; }
+        .chat-msg.bot code { background: var(--inset-bg); padding: 1px 5px; border-radius: 4px; font-size: 0.8rem; }
+        .chat-msg.bot table { border-collapse: collapse; margin: 6px 0; font-size: 0.75rem; white-space: normal; }
+        .chat-msg.bot th, .chat-msg.bot td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+        .chat-msg.bot pre { background: var(--inset-bg); padding: 8px; border-radius: 8px; overflow-x: auto; }
+        .chat-msg.note { align-self: center; background: transparent; color: var(--muted); font-size: 0.78rem; }
+        .chat-typing { align-self: flex-start; display: flex; gap: 4px; padding: 12px 14px; }
+        .chat-typing span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: blink 1.2s infinite both; }
+        .chat-typing span:nth-child(2) { animation-delay: 0.2s; }
+        .chat-typing span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+
+        .chat-input-row { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); }
+        .chat-input-row textarea {
+            flex: 1; resize: none; height: 42px; max-height: 100px; padding: 10px 12px;
+            border-radius: 10px; border: 1px solid var(--border); background: var(--input-bg);
+            color: var(--text); font-family: inherit; font-size: 0.85rem; outline: none;
+        }
+        .chat-input-row textarea:focus { border-color: var(--accent); }
+        .chat-send {
+            border: none; border-radius: 10px; width: 42px; cursor: pointer;
+            background: linear-gradient(135deg, #8b5cf6, #ec4899); color: #fff; font-size: 1rem;
+        }
+        .chat-send:disabled { opacity: 0.5; cursor: not-allowed; }
+        .chat-send.stop { background: linear-gradient(135deg, #ef4444, #f97316); }
+
+        .chat-settings {
+            display: none; flex-direction: column; gap: 10px; padding: 16px;
+            background: var(--inset-bg-soft); border-bottom: 1px solid var(--border);
+        }
+        .chat-settings.open { display: flex; }
+        .chat-settings input {
+            padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+            background: var(--input-bg); color: var(--text); font-family: inherit; font-size: 0.82rem; outline: none;
+        }
+        .chat-settings .row { display: flex; gap: 8px; }
+        .chat-settings .row button { flex: 1; }
+        .chat-suggests { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 10px; }
+        .chat-chip {
+            font-size: 0.72rem; padding: 6px 10px; border-radius: 14px; cursor: pointer;
+            background: var(--inset-bg); border: 1px solid var(--border); color: var(--muted);
+        }
+        .chat-chip:hover { border-color: var(--accent); color: var(--text); }
     </style>
     <script>
         (function () {
@@ -493,6 +621,51 @@
             </div>
         </div>
     </div>
+    <!-- ===== AI Assistant ===== -->
+    <div id="chatBubble" class="chat-bubble">
+        <span class="bub-close" id="chatBubbleClose" title="Dismiss">✕</span>
+        Hi there! 👋 How may I assist you today?
+    </div>
+    <button id="chatFab" class="chat-fab" title="Ask the AI Assistant">💬</button>
+
+    <div id="chatPanel" class="chat-panel glass">
+        <div class="chat-header">
+            <div class="ttl"><span class="dot"></span> AI Tag Assistant</div>
+            <div class="chat-header-btns">
+                <button id="chatSettingsBtn" class="chat-icon-btn" title="AI Settings">⚙</button>
+                <button id="chatClearBtn" class="chat-icon-btn" title="New chat">⟲</button>
+                <button id="chatCloseBtn" class="chat-icon-btn" title="Close">✕</button>
+            </div>
+        </div>
+
+        <div id="chatSettings" class="chat-settings">
+            <div style="font-size:0.8rem;color:var(--muted)">
+                Paste your <b>Groq API key</b> — get a free one at <code>console.groq.com</code> → API Keys.
+                Stored on the server only.
+            </div>
+            <input type="password" id="groqKeyInput" placeholder="Groq API key (gsk_...)">
+            <div class="row">
+                <button id="saveGroqBtn" class="btn btn-primary" style="padding:9px">Save Key</button>
+                <button id="clearGroqBtn" class="btn btn-danger" style="padding:9px">Clear</button>
+            </div>
+            <div id="groqState" style="font-size:0.78rem;color:var(--muted)"></div>
+        </div>
+
+        <div id="chatBody" class="chat-body"></div>
+
+        <div id="chatSuggests" class="chat-suggests">
+            <span class="chat-chip">Is GA4 implemented on https://www.nike.com ?</span>
+            <span class="chat-chip">Crawl https://example.com and give me all page URLs</span>
+            <span class="chat-chip">Which pixels fire on https://www.bbc.com under each consent scenario?</span>
+            <span class="chat-chip">How do I fix GA4 page_view not firing? Give an example</span>
+        </div>
+
+        <div class="chat-input-row">
+            <textarea id="chatInput" placeholder="Ask about any URL's tags…" rows="1"></textarea>
+            <button id="chatSend" class="chat-send">➤</button>
+        </div>
+    </div>
+
     <script src="app.js"></script>
 </body>
 </html>

@@ -696,10 +696,14 @@ async def run_batch(browser, urls_batch, start_index, total, mode=None):
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", help="Mode of audit: 'tealium' or 'ga4'")
+    parser.add_argument("--mode", help="Mode of audit: 'tealium', 'ga4' or 'pixels'")
+    parser.add_argument("--input", default="input_sites.xlsx", help="Input Excel of URLs")
+    parser.add_argument("--output", default="validation_results.xlsx", help="Output Excel path")
+    parser.add_argument("--json-out", dest="json_out", default="validation_results.json",
+                        help="Output path for rich per-scenario pixel JSON")
     args = parser.parse_args()
 
-    input_file, output_file = "input_sites.xlsx", "validation_results.xlsx"
+    input_file, output_file = args.input, args.output
     if not os.path.exists(input_file): return
     df = pd.read_excel(input_file)
     url_col = next((col for col in df.columns if any(n in str(col).lower() for n in ['url', 'link', 'website', 'site', 'address'])), None)
@@ -717,7 +721,7 @@ async def main():
     # Persist rich per-scenario pixel data (used by the UI for source attribution)
     if args.mode == 'pixels':
         rich = [r.pop("_rich") for r in all_results if "_rich" in r]
-        with open("validation_results.json", "w", encoding="utf-8") as f:
+        with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump({"generated": datetime.datetime.now().isoformat(),
                        "scenarios": SCENARIOS, "results": rich}, f, indent=2)
     else:

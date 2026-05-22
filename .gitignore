@@ -10,4 +10,9 @@ input_sites.xlsx
 schedule.json
 schedules.json
 mail_config.json
+ai_config.json
+ai_input.xlsx
+ai_results.xlsx
+ai_results.json
+ai_crawled.xlsx
 package-lock.json

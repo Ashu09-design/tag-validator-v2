@@ -768,3 +768,218 @@ function renderDcTable() {
         }
     }).join('');
 }
+
+// =============== AI ASSISTANT CHAT ===============
+let chatHistory = [];          // [{role:'user'|'assistant', content}]
+let chatSending = false;
+let chatAbort = null;          // AbortController for the in-flight request
+
+function setChatSendMode(sending) {
+    const btn = document.getElementById('chatSend');
+    if (sending) {
+        btn.classList.add('stop');
+        btn.innerHTML = '■';
+        btn.title = 'Cancel response';
+    } else {
+        btn.classList.remove('stop');
+        btn.innerHTML = '➤';
+        btn.title = 'Send';
+    }
+}
+
+function cancelChat() {
+    if (chatAbort) chatAbort.abort();
+}
+
+// Minimal, safe markdown -> HTML (escapes everything first).
+function renderMarkdown(src) {
+    let s = String(src);
+    s = s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    s = s.replace(/```[\w]*\n?([\s\S]*?)```/g, (m, c) => `<pre>${c.replace(/\n$/, '')}</pre>`);
+    s = s.replace(/(^\|.+\|[ \t]*\n\|[-:\s|]+\|[ \t]*\n(?:\|.*\|[ \t]*\n?)*)/gm, block => {
+        const lines = block.trim().split('\n');
+        const cells = l => l.replace(/^\||\|$/g, '').split('|').map(x => x.trim());
+        const head = cells(lines[0]);
+        const rows = lines.slice(2).map(cells);
+        let h = '<table><thead><tr>' + head.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>';
+        h += rows.map(r => '<tr>' + r.map(c => `<td>${c}</td>`).join('') + '</tr>').join('');
+        return h + '</tbody></table>';
+    });
+    s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // auto-linkify bare assistant download paths
+    s = s.replace(/(?<!["'>=])(\/api\/ai\/download\/(?:results|crawled))/g,
+        '<a href="$1" target="_blank" rel="noopener">Download file</a>');
+    s = s.replace(/(?:^|\n)((?:[-*] .+(?:\n|$))+)/g, (m, blk) => {
+        const items = blk.trim().split('\n').map(l => `<li>${l.replace(/^[-*]\s+/, '')}</li>`).join('');
+        return `<ul style="margin:6px 0 6px 18px">${items}</ul>`;
+    });
+    s = s.replace(/\n/g, '<br>');
+    s = s.replace(/<br>(\s*<(?:table|thead|tbody|tr|ul|pre|\/))/g, '$1');
+    return s;
+}
+
+function addChatMessage(role, content, type) {
+    const body = document.getElementById('chatBody');
+    const div = document.createElement('div');
+    div.className = 'chat-msg ' + (type || role);
+    div.innerHTML = role === 'bot' ? renderMarkdown(content) : escapeHtml(content);
+    body.appendChild(div);
+    body.scrollTop = body.scrollHeight;
+    return div;
+}
+
+function showChatTyping() {
+    const body = document.getElementById('chatBody');
+    const div = document.createElement('div');
+    div.className = 'chat-typing';
+    div.id = 'chatTyping';
+    div.innerHTML = '<span></span><span></span><span></span>';
+    body.appendChild(div);
+    body.scrollTop = body.scrollHeight;
+}
+function hideChatTyping() {
+    const t = document.getElementById('chatTyping');
+    if (t) t.remove();
+}
+
+async function sendChatMessage(text) {
+    text = (text || '').trim();
+    if (!text || chatSending) return;
+    chatSending = true;
+    setChatSendMode(true);
+    document.getElementById('chatSuggests').style.display = 'none';
+
+    addChatMessage('user', text);
+    chatHistory.push({ role: 'user', content: text });
+    const input = document.getElementById('chatInput');
+    input.value = '';
+    input.style.height = '42px';
+    showChatTyping();
+
+    chatAbort = new AbortController();
+    try {
+        const r = await fetch('/api/ai/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: chatHistory }),
+            signal: chatAbort.signal,
+        });
+        const d = await r.json();
+        hideChatTyping();
+        if (!r.ok) {
+            addChatMessage('bot', '⚠ ' + (d.error || 'Something went wrong.'), 'note');
+        } else {
+            addChatMessage('bot', d.reply);
+            chatHistory.push({ role: 'assistant', content: d.reply });
+        }
+    } catch (e) {
+        hideChatTyping();
+        if (e.name === 'AbortError') {
+            addChatMessage('bot', 'Okay, cancelled that one. 👍 Ask me whenever you’re ready.', 'note');
+        } else {
+            addChatMessage('bot', '⚠ Network error: ' + e.message, 'note');
+        }
+    } finally {
+        chatSending = false;
+        chatAbort = null;
+        setChatSendMode(false);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const fab = document.getElementById('chatFab');
+    const panel = document.getElementById('chatPanel');
+    const input = document.getElementById('chatInput');
+    if (!fab) return;
+
+    async function refreshGroqState() {
+        try {
+            const d = await (await fetch('/api/ai/config')).json();
+            document.getElementById('groqState').innerHTML = d.configured
+                ? '✅ API key saved — assistant is ready.'
+                : '⚠ No Groq key yet — add one to use the assistant.';
+        } catch { /* ignore */ }
+    }
+
+    function greet() {
+        if (document.getElementById('chatBody').children.length) return;
+        addChatMessage('bot', "Hey! I'm **Tagly** 👋 your web-analytics assistant. I can:\n\n"
+            + "- Audit any URL — **GTM, GA4, Adobe, Tealium**, IDs, report suites, page-view tags\n"
+            + "- Check **marketing pixels** across consent scenarios\n"
+            + "- **Crawl a whole domain** into an Excel of page URLs\n"
+            + "- Explain **how to fix** tagging issues with examples\n\n"
+            + "What are we looking at today?");
+    }
+
+    const bubble = document.getElementById('chatBubble');
+    function hideBubble() { if (bubble) bubble.classList.add('hidden'); }
+
+    function openChat() {
+        panel.classList.add('open');
+        fab.classList.add('hidden');
+        hideBubble();
+        greet();
+        refreshGroqState();
+        input.focus();
+    }
+    fab.onclick = openChat;
+    if (bubble) {
+        bubble.onclick = openChat;
+        const bc = document.getElementById('chatBubbleClose');
+        if (bc) bc.onclick = (e) => { e.stopPropagation(); hideBubble(); };
+        // auto-dismiss the greeting bubble after a while if untouched
+        setTimeout(hideBubble, 12000);
+    }
+    document.getElementById('chatCloseBtn').onclick = () => {
+        panel.classList.remove('open');
+        fab.classList.remove('hidden');
+    };
+    document.getElementById('chatClearBtn').onclick = () => {
+        chatHistory = [];
+        document.getElementById('chatBody').innerHTML = '';
+        document.getElementById('chatSuggests').style.display = 'flex';
+        greet();
+    };
+    document.getElementById('chatSettingsBtn').onclick = () => {
+        document.getElementById('chatSettings').classList.toggle('open');
+        refreshGroqState();
+    };
+
+    document.getElementById('saveGroqBtn').onclick = async () => {
+        const apiKey = document.getElementById('groqKeyInput').value.trim();
+        if (!apiKey) return;
+        const r = await fetch('/api/ai/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ apiKey }),
+        });
+        document.getElementById('groqKeyInput').value = '';
+        if (r.ok) document.getElementById('chatSettings').classList.remove('open');
+        refreshGroqState();
+    };
+    document.getElementById('clearGroqBtn').onclick = async () => {
+        await fetch('/api/ai/config', { method: 'DELETE' });
+        document.getElementById('groqKeyInput').value = '';
+        refreshGroqState();
+    };
+
+    document.getElementById('chatSend').onclick = () => {
+        if (chatSending) cancelChat();
+        else sendChatMessage(input.value);
+    };
+    input.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            if (!chatSending) sendChatMessage(input.value);
+        }
+    });
+    input.addEventListener('input', () => {
+        input.style.height = '42px';
+        input.style.height = Math.min(input.scrollHeight, 100) + 'px';
+    });
+    document.querySelectorAll('.chat-chip').forEach(chip => {
+        chip.onclick = () => sendChatMessage(chip.innerText);
+    });
+});
