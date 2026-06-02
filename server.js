@@ -62,6 +62,34 @@ app.post('/api/tag-validator/upload', upload.single('file'), (req, res) => {
     res.json({ success: true, originalName: req.file.originalname });
 });
 
+// Single-URL quick run: create a temp Excel with one URL and run the validator
+app.post('/api/tag-validator/run-single', (req, res) => {
+    if (validatorProcess) return res.status(400).json({ error: 'Running' });
+    const { url, mode } = req.body || {};
+    if (!url) return res.status(400).json({ error: 'URL required' });
+
+    // Write a single-URL Excel file
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet([['URL'], [url.trim()]]);
+    XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+    XLSX.writeFile(wb, path.join(__dirname, 'input_sites.xlsx'));
+
+    const auditMode = mode || 'tealium';
+    lastRunMode = auditMode;
+    cancelRequested = false;
+    validatorLogs = [`Quick Run: ${url} (${auditMode.toUpperCase()} MODE)...`];
+    const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+    validatorProcess = spawn(pyCmd, ['-u', 'bulk_tag_validator.py', '--mode', auditMode], { cwd: __dirname });
+
+    validatorProcess.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
+    validatorProcess.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
+    validatorProcess.on('close', code => {
+        validatorLogs.push(cancelRequested ? 'Run cancelled.' : `Finished with code ${code}`);
+        validatorProcess = null;
+    });
+    res.json({ success: true });
+});
+
 app.post('/api/tag-validator/run', (req, res) => {
     if (validatorProcess) return res.status(400).json({ error: 'Running' });
     const mode = req.body.mode || 'tealium'; // Default to tealium if not specified
@@ -95,7 +123,7 @@ app.get('/api/tag-validator/download', (req, res) => {
     const p = path.join(__dirname, 'validation_results.xlsx');
     if (!fs.existsSync(p))
         return res.status(404).send('No report yet — run a validation first.');
-    const label = { tealium: 'Tealium-Adobe', ga4: 'GA4-GTM', pixels: 'Marketing-Pixels' }[lastRunMode] || lastRunMode;
+    const label = { tealium: 'Tealium-Adobe', ga4: 'GA4-GTM', pixels: 'Marketing-Pixels', clicks: 'Click-Tracking' }[lastRunMode] || lastRunMode;
     res.download(p, `Report-${label}.xlsx`);
 });
 
@@ -191,6 +219,20 @@ app.get('/api/tag-validator/results-rich', (req, res) => {
         res.json({ results: [], scenarios: [] });
     }
 });
+
+// Rich per-element click tracking data (GA4 events + Adobe calls per click)
+app.get('/api/tag-validator/click-results', (req, res) => {
+    const p = path.join(__dirname, 'click_results.json');
+    if (!fs.existsSync(p)) return res.json({ results: [] });
+    try {
+        const d = JSON.parse(fs.readFileSync(p, 'utf8'));
+        res.json({ results: d.results || [] });
+    } catch {
+        res.json({ results: [] });
+    }
+});
+
+
 
 // --- Email alerts (Brevo HTTP API) ---
 // Sent over HTTPS:443, which cloud hosts allow — unlike SMTP ports 465/587

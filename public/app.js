@@ -4,11 +4,30 @@ let scheduleFile = null;
 let richResults = [];                 // per-scenario pixel data (source attribution)
 let scenarioList = ['Accept All', 'Reject All', 'Performance', 'Functional', 'Targeting'];
 let currentScenario = 'Accept All';
+let clickResults = [];                // per-element click tracking data
+let dcClickResults = [];              // domain crawl click tracking data
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function formatSingleGa4Event(e) {
+    if (!e) return '<span style="color:#64748b">--</span>';
+    const measId = e.measurement_id ? `<span class="badge" style="background:rgba(59,130,246,0.12);color:#60a5fa;border:1px solid rgba(59,130,246,0.35);margin-bottom:4px;display:inline-block;font-family:monospace;font-size:0.65rem;">${e.measurement_id}</span>` : '';
+    let s = `<div style="margin-bottom:4px;">${measId}<br><b style="color:#4ade80">${e.event}</b></div>`;
+    const pkeys = Object.keys(e.params || {});
+    if (pkeys.length) {
+        s += `<div class="event-params" style="max-height:90px; overflow-y:auto; padding:6px; background:rgba(15,23,42,0.6); border:1px solid rgba(255,255,255,0.08); border-radius:6px; font-family:var(--font-mono); font-size:0.7rem; line-height:1.3;">` + 
+             pkeys.map(k => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${k}</span>: <span style="color:#38bdf8">${e.params[k]}</span></div>`).join('') + 
+             `</div>`;
+    }
+    return s;
+}
 
 function switchTab(tabId) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelector(`[onclick="switchTab('${tabId}')"]`).classList.add('active');
-    
+
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
     document.getElementById(`tab-${tabId}`).classList.add('active');
 
@@ -18,11 +37,32 @@ function switchTab(tabId) {
     }
 }
 
+// Smart element type display for click tracking
+function formatElementType(tag) {
+    const t = (tag || '').toUpperCase();
+    const typeMap = {
+        'A': { label: 'Link', bg: 'rgba(96,165,250,0.12)', color: '#60a5fa', border: 'rgba(96,165,250,0.35)' },
+        'BUTTON': { label: 'Button', bg: 'rgba(34,197,94,0.12)', color: '#4ade80', border: 'rgba(34,197,94,0.35)' },
+        'INPUT': { label: 'Input', bg: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: 'rgba(251,191,36,0.35)' },
+        'SELECT': { label: 'Select', bg: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: 'rgba(251,191,36,0.35)' },
+        'TEXTAREA': { label: 'Textarea', bg: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: 'rgba(251,191,36,0.35)' },
+        'FORM': { label: 'Form', bg: 'rgba(168,85,247,0.12)', color: '#a78bfa', border: 'rgba(168,85,247,0.35)' },
+        'VIDEO': { label: 'Video', bg: 'rgba(236,72,153,0.12)', color: '#ec4899', border: 'rgba(236,72,153,0.35)' },
+        'AUDIO': { label: 'Audio', bg: 'rgba(236,72,153,0.12)', color: '#ec4899', border: 'rgba(236,72,153,0.35)' },
+        'SUMMARY': { label: 'Toggle', bg: 'rgba(139,92,246,0.12)', color: '#a78bfa', border: 'rgba(139,92,246,0.35)' },
+        'AREA': { label: 'Area', bg: 'rgba(96,165,250,0.12)', color: '#60a5fa', border: 'rgba(96,165,250,0.35)' },
+        'LABEL': { label: 'Label', bg: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: 'rgba(251,191,36,0.35)' },
+    };
+    const info = typeMap[t] || { label: t, bg: 'rgba(139,92,246,0.1)', color: '#a78bfa', border: 'rgba(139,92,246,0.3)' };
+    return `<span class="badge" style="background:${info.bg};color:${info.color};border:1px solid ${info.border}">${info.label}</span>`;
+}
+
 function setAuditMode(mode) {
     currentAuditMode = mode;
     document.getElementById('modeTealium').classList.toggle('active', mode === 'tealium');
     document.getElementById('modeGA4').classList.toggle('active', mode === 'ga4');
     document.getElementById('modePixels').classList.toggle('active', mode === 'pixels');
+    document.getElementById('modeClicks').classList.toggle('active', mode === 'clicks');
     const sct = document.getElementById('scenarioTabs');
     if (mode === 'pixels') {
         sct.classList.remove('hidden');
@@ -30,6 +70,9 @@ function setAuditMode(mode) {
         loadRich();
     } else {
         sct.classList.add('hidden');
+    }
+    if (mode === 'clicks') {
+        loadClickResults();
     }
     renderTable();
 }
@@ -56,8 +99,17 @@ async function loadRich() {
     } catch { richResults = []; }
 }
 
-const SRC_CLASS = { 'Tealium': 'src-teal', 'Adobe': 'src-adobe', 'GTM / gtag': 'src-gtm', 'Hardcoded': 'src-hard' };
+const SRC_CLASS = { 'Tealium': 'src-teal', 'Adobe': 'src-adobe', 'GTM / gtag': 'src-gtm', 'Hardcoded': 'src-hard', 'Detected (JS)': 'src-hard' };
 const srcChip = s => `<span class="src ${SRC_CLASS[s] || 'src-hard'}">${s}</span>`;
+
+// ===== CLICK RESULTS =====
+async function loadClickResults() {
+    try {
+        const d = await (await fetch('/api/tag-validator/click-results')).json();
+        clickResults = d.results || [];
+        if (currentAuditMode === 'clicks') renderTable();
+    } catch { clickResults = []; }
+}
 
 // --- THEME TOGGLE ---
 function applyTheme(theme) {
@@ -149,6 +201,63 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     downloadBtn.onclick = () => window.location.href = '/api/tag-validator/download';
+
+    // --- QUICK RUN (single URL) ---
+    const quickRunBtn = document.getElementById('quickRunBtn');
+    const singleUrlInput = document.getElementById('singleUrlInput');
+
+    quickRunBtn.onclick = async () => {
+        const url = singleUrlInput.value.trim();
+        if (!url) { alert('Paste a URL first (e.g. https://example.com)'); return; }
+
+        quickRunBtn.disabled = true;
+        quickRunBtn.innerText = '⚡ Running...';
+        runBtn.disabled = true;
+        cancelBtn.classList.remove('hidden');
+        cancelBtn.disabled = false;
+        cancelBtn.innerText = 'Cancel';
+        logBox.classList.remove('hidden');
+        document.getElementById('progressSection').classList.remove('hidden');
+
+        await fetch('/api/tag-validator/run-single', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, mode: currentAuditMode })
+        });
+
+        const poll = setInterval(async () => {
+            const r = await fetch('/api/tag-validator/status');
+            const d = await r.json();
+            const logs = d.logs.filter(l => !l.includes('DeprecationWarning') && !l.includes('Pyarrow') && l.trim());
+            logBox.innerHTML = logs.map(l => '<div>' + l + '</div>').join('');
+            logBox.scrollTop = logBox.scrollHeight;
+
+            const last = [...logs].reverse().find(l => l.match(/\[\d+\/\d+\]/));
+            if (last) {
+                const m = last.match(/\[(\d+)\/(\d+)\]/);
+                if (m) {
+                    const c = +m[1], t = +m[2], pct = Math.round(c / t * 100);
+                    document.getElementById('progressLabel').innerText = c + '/' + t;
+                    document.getElementById('progressBar').style.width = pct + '%';
+                }
+            }
+
+            if (!d.running) {
+                clearInterval(poll);
+                quickRunBtn.disabled = false;
+                quickRunBtn.innerText = '⚡ Quick Run';
+                runBtn.disabled = false;
+                cancelBtn.classList.add('hidden');
+                loadResults();
+            }
+        }, 800);
+    };
+
+    // Allow pressing Enter in the URL input to trigger Quick Run
+    singleUrlInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') quickRunBtn.click();
+    });
+
     renderTable();
 
     // --- SCHEDULER TAB LOGIC ---
@@ -251,6 +360,7 @@ async function loadResults() {
     cachedResults = d.results;
     document.getElementById('downloadBtn').classList.remove('hidden');
     if (currentAuditMode === 'pixels') await loadRich();
+    if (currentAuditMode === 'clicks') await loadClickResults();
     renderTable();
 }
 
@@ -259,7 +369,17 @@ function renderTable() {
     const body = document.getElementById('resultsBody');
     const statsBar = document.getElementById('statsBar');
 
-    if (currentAuditMode === 'pixels') {
+    if (currentAuditMode === 'clicks') {
+        head.innerHTML = `
+            <tr>
+                <th>#</th><th>URL</th>
+                <th style="text-align:center">Elements</th>
+                <th class="h-teal" style="text-align:center">With Tracking</th>
+                <th style="text-align:center; color:#f87171">No Tracking</th>
+                <th>Details</th>
+            </tr>
+        `;
+    } else if (currentAuditMode === 'pixels') {
         head.innerHTML = `
             <tr>
                 <th>#</th><th>URL</th>
@@ -299,7 +419,7 @@ function renderTable() {
     }
 
     if (!cachedResults.length) {
-        const ec = currentAuditMode === 'pixels' ? 7 : (currentAuditMode === 'tealium' ? 9 : 7);
+        const ec = currentAuditMode === 'clicks' ? 6 : currentAuditMode === 'pixels' ? 7 : (currentAuditMode === 'tealium' ? 9 : 7);
         body.innerHTML = `<tr><td colspan="${ec}" class="empty-msg">Upload a file and run validation</td></tr>`;
         statsBar.classList.add('hidden');
         return;
@@ -315,7 +435,18 @@ function renderTable() {
     });
 
     statsBar.classList.remove('hidden');
-    if (currentAuditMode === 'pixels') {
+    if (currentAuditMode === 'clicks') {
+        const totalEl = cachedResults.reduce((a, r) => a + (Number(r.Total_Elements) || 0), 0);
+        const tracked = cachedResults.reduce((a, r) => a + (Number(r.With_Tracking) || 0), 0);
+        const untracked = cachedResults.reduce((a, r) => a + (Number(r.Without_Tracking) || 0), 0);
+        const accuracy = totalEl ? Math.round((tracked / totalEl) * 100) : 100;
+        statsBar.innerHTML = `
+            <div class="stat"><div class="stat-dot" style="background:#60a5fa;color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${totalEl}</div><div class="stat-lbl">Total Elements Clicked</div></div></div>
+            <div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${tracked}</div><div class="stat-lbl">With Analytics Tracking</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:#ef4444;color:#ef4444;"></div><div><div class="stat-val" style="color:#f87171;">${untracked}</div><div class="stat-lbl">No Tracking Detected</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:#c084fc;color:#c084fc;"></div><div><div class="stat-val" style="color:#e9d5ff;">${accuracy}%</div><div class="stat-lbl">Tracking Accuracy</div></div></div>
+        `;
+    } else if (currentAuditMode === 'pixels') {
         const fires = cachedResults.reduce((a, r) => a + (Number(r[currentScenario + '_Count']) || 0), 0);
         statsBar.innerHTML = `
             <div class="stat"><div class="stat-dot" style="background:#60a5fa;color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${fires}</div><div class="stat-lbl">Pixel Fires · ${currentScenario}</div></div></div>
@@ -334,6 +465,96 @@ function renderTable() {
     const PIX = v => (!v || v === 'None')
         ? '<span style="color:#64748b">None</span>'
         : '<span class="mono" style="white-space:normal">' + v + '</span>';
+
+    if (currentAuditMode === 'clicks') {
+        const clickByUrl = {};
+        clickResults.forEach(x => { clickByUrl[x.URL] = x; });
+        let html = '';
+        cachedResults.forEach((r, i) => {
+            const rich = clickByUrl[r.URL];
+            const elems = (rich && rich.elements) || [];
+            const detailId = 'click-detail-' + i;
+            html += `<tr style="cursor:pointer" onclick="document.getElementById('${detailId}').classList.toggle('hidden')">
+                <td>${i + 1}</td>
+                <td class="url-col" title="${r.URL}">${r.URL}</td>
+                <td style="text-align:center"><span class="badge b-count">${r.Total_Elements || 0}</span></td>
+                <td style="text-align:center"><span class="badge b-pass">${r.With_Tracking || 0}</span></td>
+                <td style="text-align:center">${(r.Without_Tracking || 0) > 0 ? '<span class="badge b-fail">' + r.Without_Tracking + '</span>' : '<span style="color:#64748b">0</span>'}</td>
+                <td><span style="font-size:0.7rem;color:var(--accent);cursor:pointer">▶ Expand</span></td>
+            </tr>`;
+            // Expandable detail row
+            html += `<tr id="${detailId}" class="hidden"><td colspan="6" style="padding:0;background:var(--inset-bg)">`;
+            if (!elems.length) {
+                html += '<div style="padding:16px;color:var(--muted)">No clickable elements found</div>';
+            } else {
+                html += '<table style="width:100%;margin:0;font-size:0.75rem"><thead><tr>' +
+                    '<th style="width:30px">#</th><th>Element</th><th>Text</th><th>Type</th>' +
+                    '<th class="h-teal">GA4 Event 1</th><th class="h-teal">GA4 Event 2</th><th class="h-teal">GA4 Event 3</th>' +
+                    '<th class="h-adobe">Adobe / Other Calls</th></tr></thead><tbody>';
+                elems.forEach((el, j) => {
+                    const ga4_1 = formatSingleGa4Event(el.ga4_events[0]);
+                    const ga4_2 = formatSingleGa4Event(el.ga4_events[1]);
+                    let ga4_3 = formatSingleGa4Event(el.ga4_events[2]);
+                    if (el.ga4_events.length > 3) {
+                        for (let k = 3; k < el.ga4_events.length; k++) {
+                            ga4_3 += '<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">' + formatSingleGa4Event(el.ga4_events[k]);
+                        }
+                    }
+                        
+                    const aaHtml = el.adobe_calls.length
+                        ? el.adobe_calls.map(c => {
+                            const displayName = c.link_name || c.events || c.link_type || 'adobe_call';
+                            const rsid = c.report_suite ? '<span class="badge" style="background:rgba(251,146,60,0.12);color:#fdba74;border:1px solid rgba(251,146,60,0.35);margin-bottom:4px;display:inline-block;font-family:monospace;font-size:0.6rem;">' + c.report_suite + '</span><br>' : '';
+                            let s = '<div style="margin-bottom:6px;">' + rsid + '<b style="color:#fdba74">' + displayName + '</b> <span style="color:#94a3b8;font-size:0.7rem">(' + c.link_type + ')</span>';
+                            
+                            const items = [];
+                            if (c.events) items.push({ k: 'events', v: c.events });
+                            Object.keys(c.evars || {}).forEach(k => { items.push({ k, v: c.evars[k] }); });
+                            Object.keys(c.props || {}).forEach(k => { items.push({ k, v: c.props[k] }); });
+                            
+                            if (items.length) {
+                                s += `<div class="event-params" style="max-height:100px; overflow-y:auto; margin-top:4px; padding:6px; background:rgba(15,23,42,0.6); border:1px solid rgba(255,255,255,0.08); border-radius:6px; font-family:var(--font-mono); font-size:0.7rem; line-height:1.3;">` + 
+                                     items.map(item => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${item.k}</span>: <span style="color:#fb923c">${item.v}</span></div>`).join('') + 
+                                     `</div>`;
+                            }
+                            s += '</div>';
+                            return s;
+                        }).join('<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">')
+                        : (el.adobe_websdk && el.adobe_websdk.length
+                            ? el.adobe_websdk.map(w => '<b style="color:#fdba74">' + w.event_type + '</b>').join('<br>')
+                            : '');
+
+                    const otherHtml = el.other_analytics && el.other_analytics.length
+                        ? el.other_analytics.map(o => `<div style="margin-bottom:4px;"><span class="badge" style="background:rgba(168,85,247,0.12);color:#c4b5fd;border:1px solid rgba(168,85,247,0.35);">${o.vendor}</span></div>`).join('')
+                        : '';
+                    
+                    let combinedAdobeOther = aaHtml;
+                    if (otherHtml) {
+                        if (combinedAdobeOther) combinedAdobeOther += '<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">';
+                        combinedAdobeOther += otherHtml;
+                    }
+                    if (!combinedAdobeOther) combinedAdobeOther = '<span style="color:#64748b">--</span>';
+
+                    const elLabel = el.element.id ? '#' + el.element.id : el.element.selector.substring(0, 40);
+                    const trackIcon = el.has_tracking ? '✅' : '⚠️';
+                    html += `<tr>
+                        <td>${j + 1}</td>
+                        <td title="${el.element.selector}">${trackIcon} <span class="mono">${elLabel}</span></td>
+                        <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${el.element.text || '--'}</td>
+                        <td>${formatElementType(el.element.tag)}</td>
+                        <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_1}</div></td>
+                        <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_2}</div></td>
+                        <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_3}</div></td>
+                        <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${combinedAdobeOther}</div></td>
+                    </tr>`;
+                });
+                html += '</tbody></table>';
+            }
+            html += '</td></tr>';
+        });
+        body.innerHTML = html;
+        return;
+    }
 
     if (currentAuditMode === 'pixels') {
         const richByUrl = {};
@@ -450,6 +671,7 @@ function setDomainMode(mode) {
     document.getElementById('dcModeTealium').classList.toggle('active', mode === 'tealium');
     document.getElementById('dcModeGA4').classList.toggle('active', mode === 'ga4');
     document.getElementById('dcModePixels').classList.toggle('active', mode === 'pixels');
+    document.getElementById('dcModeClicks').classList.toggle('active', mode === 'clicks');
     document.getElementById('dcScenarioTabs').classList.toggle('hidden', mode !== 'pixels');
     if (mode === 'pixels') renderDcScenarioTabs();
     renderDcTable();
@@ -637,6 +859,12 @@ async function loadDcResults() {
             renderDcScenarioTabs();
         } catch { dcRichResults = []; }
     }
+    if (dcMode === 'clicks') {
+        try {
+            const cr = await (await fetch('/api/tag-validator/click-results')).json();
+            dcClickResults = cr.results || [];
+        } catch { dcClickResults = []; }
+    }
     renderDcTable();
 }
 
@@ -646,7 +874,16 @@ function renderDcTable() {
     const statsBar = document.getElementById('dcStatsBar');
     if (!head) return;
 
-    if (dcMode === 'pixels') {
+    if (dcMode === 'clicks') {
+        head.innerHTML = `
+            <tr>
+                <th>#</th><th>URL</th>
+                <th style="text-align:center">Elements</th>
+                <th class="h-teal" style="text-align:center">With Tracking</th>
+                <th style="text-align:center; color:#f87171">No Tracking</th>
+                <th>Details</th>
+            </tr>`;
+    } else if (dcMode === 'pixels') {
         head.innerHTML = `
             <tr>
                 <th>#</th><th>URL</th>
@@ -683,7 +920,7 @@ function renderDcTable() {
     }
 
     if (!dcCachedResults.length) {
-        const ec = dcMode === 'pixels' ? 7 : (dcMode === 'tealium' ? 9 : 7);
+        const ec = dcMode === 'clicks' ? 6 : dcMode === 'pixels' ? 7 : (dcMode === 'tealium' ? 9 : 7);
         body.innerHTML = `<tr><td colspan="${ec}" class="empty-msg">Run Crawl + Validate to see tag audit per page</td></tr>`;
         statsBar.classList.add('hidden');
         return;
@@ -699,7 +936,16 @@ function renderDcTable() {
     });
 
     statsBar.classList.remove('hidden');
-    if (dcMode === 'pixels') {
+    if (dcMode === 'clicks') {
+        const totalEl = dcCachedResults.reduce((a, r) => a + (Number(r.Total_Elements) || 0), 0);
+        const tracked = dcCachedResults.reduce((a, r) => a + (Number(r.With_Tracking) || 0), 0);
+        const untracked = dcCachedResults.reduce((a, r) => a + (Number(r.Without_Tracking) || 0), 0);
+        statsBar.innerHTML = `
+            <div class="stat"><div class="stat-dot" style="background:#60a5fa;color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${totalEl}</div><div class="stat-lbl">Total Elements Clicked</div></div></div>
+            <div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${tracked}</div><div class="stat-lbl">With Analytics Tracking</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:#ef4444;color:#ef4444;"></div><div><div class="stat-val" style="color:#f87171;">${untracked}</div><div class="stat-lbl">No Tracking Detected</div></div></div>
+        `;
+    } else if (dcMode === 'pixels') {
         const fires = dcCachedResults.reduce((a, r) => a + (Number(r[currentScenario + '_Count']) || 0), 0);
         statsBar.innerHTML = `
             <div class="stat"><div class="stat-dot" style="background:#60a5fa;color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${fires}</div><div class="stat-lbl">Pixel Fires · ${currentScenario}</div></div></div>
@@ -711,6 +957,95 @@ function renderDcTable() {
         statsBar.innerHTML = `
             <div class="stat"><div class="stat-dot dot-adobe"></div><div><div class="stat-val val-adobe">${st.adobe}/${dcCachedResults.length}</div><div class="stat-lbl">Adobe Detected</div></div></div>
             <div class="stat"><div class="stat-dot" style="background:#60a5fa; color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${st.ga4}/${dcCachedResults.length}</div><div class="stat-lbl">GA4 Detected</div></div></div>`;
+    }
+
+    if (dcMode === 'clicks') {
+        const clickByUrl = {};
+        dcClickResults.forEach(x => { clickByUrl[x.URL] = x; });
+        let html = '';
+        dcCachedResults.forEach((r, i) => {
+            const rich = clickByUrl[r.URL];
+            const elems = (rich && rich.elements) || [];
+            const detailId = 'dc-click-detail-' + i;
+            html += `<tr style="cursor:pointer" onclick="document.getElementById('${detailId}').classList.toggle('hidden')">
+                <td>${i + 1}</td>
+                <td class="url-col" title="${r.URL}">${r.URL}</td>
+                <td style="text-align:center"><span class="badge b-count">${r.Total_Elements || 0}</span></td>
+                <td style="text-align:center"><span class="badge b-pass">${r.With_Tracking || 0}</span></td>
+                <td style="text-align:center">${(r.Without_Tracking || 0) > 0 ? '<span class="badge b-fail">' + r.Without_Tracking + '</span>' : '<span style="color:#64748b">0</span>'}</td>
+                <td><span style="font-size:0.7rem;color:var(--accent);cursor:pointer">▶ Expand</span></td>
+            </tr>`;
+            html += `<tr id="${detailId}" class="hidden"><td colspan="6" style="padding:0;background:var(--inset-bg)">`;
+            if (!elems.length) {
+                html += '<div style="padding:16px;color:var(--muted)">No clickable elements found</div>';
+            } else {
+                html += '<table style="width:100%;margin:0;font-size:0.75rem"><thead><tr>' +
+                    '<th style="width:30px">#</th><th>Element</th><th>Text</th><th>Type</th>' +
+                    '<th class="h-teal">GA4 Event 1</th><th class="h-teal">GA4 Event 2</th><th class="h-teal">GA4 Event 3</th>' +
+                    '<th class="h-adobe">Adobe / Other Calls</th></tr></thead><tbody>';
+                elems.forEach((el, j) => {
+                    const ga4_1 = formatSingleGa4Event(el.ga4_events[0]);
+                    const ga4_2 = formatSingleGa4Event(el.ga4_events[1]);
+                    let ga4_3 = formatSingleGa4Event(el.ga4_events[2]);
+                    if (el.ga4_events.length > 3) {
+                        for (let k = 3; k < el.ga4_events.length; k++) {
+                            ga4_3 += '<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">' + formatSingleGa4Event(el.ga4_events[k]);
+                        }
+                    }
+                        
+                    const aaHtml = el.adobe_calls.length
+                        ? el.adobe_calls.map(c => {
+                            const displayName = c.link_name || c.events || c.link_type || 'adobe_call';
+                            const rsid = c.report_suite ? '<span class="badge" style="background:rgba(251,146,60,0.12);color:#fdba74;border:1px solid rgba(251,146,60,0.35);margin-bottom:4px;display:inline-block;font-family:monospace;font-size:0.6rem;">' + c.report_suite + '</span><br>' : '';
+                            let s = '<div style="margin-bottom:6px;">' + rsid + '<b style="color:#fdba74">' + displayName + '</b> <span style="color:#94a3b8;font-size:0.7rem">(' + c.link_type + ')</span>';
+                            
+                            const items = [];
+                            if (c.events) items.push({ k: 'events', v: c.events });
+                            Object.keys(c.evars || {}).forEach(k => { items.push({ k, v: c.evars[k] }); });
+                            Object.keys(c.props || {}).forEach(k => { items.push({ k, v: c.props[k] }); });
+                            
+                            if (items.length) {
+                                s += `<div class="event-params" style="max-height:100px; overflow-y:auto; margin-top:4px; padding:6px; background:rgba(15,23,42,0.6); border:1px solid rgba(255,255,255,0.08); border-radius:6px; font-family:var(--font-mono); font-size:0.7rem; line-height:1.3;">` + 
+                                     items.map(item => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${item.k}</span>: <span style="color:#fb923c">${item.v}</span></div>`).join('') + 
+                                     `</div>`;
+                            }
+                            s += '</div>';
+                            return s;
+                        }).join('<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">')
+                        : (el.adobe_websdk && el.adobe_websdk.length
+                            ? el.adobe_websdk.map(w => '<b style="color:#fdba74">' + w.event_type + '</b>').join('<br>')
+                            : '');
+
+                    const otherHtml = el.other_analytics && el.other_analytics.length
+                        ? el.other_analytics.map(o => `<div style="margin-bottom:4px;"><span class="badge" style="background:rgba(168,85,247,0.12);color:#c4b5fd;border:1px solid rgba(168,85,247,0.35);">${o.vendor}</span></div>`).join('')
+                        : '';
+                    
+                    let combinedAdobeOther = aaHtml;
+                    if (otherHtml) {
+                        if (combinedAdobeOther) combinedAdobeOther += '<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">';
+                        combinedAdobeOther += otherHtml;
+                    }
+                    if (!combinedAdobeOther) combinedAdobeOther = '<span style="color:#64748b">--</span>';
+
+                    const elLabel = el.element.id ? '#' + el.element.id : el.element.selector.substring(0, 40);
+                    const trackIcon = el.has_tracking ? '✅' : '⚠️';
+                    html += `<tr>
+                        <td>${j + 1}</td>
+                        <td title="${el.element.selector}">${trackIcon} <span class="mono">${elLabel}</span></td>
+                        <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${el.element.text || '--'}</td>
+                        <td>${formatElementType(el.element.tag)}</td>
+                        <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_1}</div></td>
+                        <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_2}</div></td>
+                        <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_3}</div></td>
+                        <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${combinedAdobeOther}</div></td>
+                    </tr>`;
+                });
+                html += '</tbody></table>';
+            }
+            html += '</td></tr>';
+        });
+        body.innerHTML = html;
+        return;
     }
 
     if (dcMode === 'pixels') {
@@ -769,6 +1104,8 @@ function renderDcTable() {
     }).join('');
 }
 
+
+
 // =============== AI ASSISTANT CHAT ===============
 let chatHistory = [];          // [{role:'user'|'assistant', content}]
 let chatSending = false;
@@ -810,7 +1147,7 @@ function renderMarkdown(src) {
     s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]+)\)/g,
         '<a href="$2" target="_blank" rel="noopener">$1</a>');
     // auto-linkify bare assistant download paths
-    s = s.replace(/(?<!["'>=])(\/api\/ai\/download\/(?:results|crawled))/g,
+    s = s.replace(/(?<!["'>= ])(\/api\/ai\/download\/(?:results|crawled))/g,
         '<a href="$1" target="_blank" rel="noopener">Download file</a>');
     s = s.replace(/(?:^|\n)((?:[-*] .+(?:\n|$))+)/g, (m, blk) => {
         const items = blk.trim().split('\n').map(l => `<li>${l.replace(/^[-*]\s+/, '')}</li>`).join('');
@@ -877,7 +1214,7 @@ async function sendChatMessage(text) {
     } catch (e) {
         hideChatTyping();
         if (e.name === 'AbortError') {
-            addChatMessage('bot', 'Okay, cancelled that one. 👍 Ask me whenever you’re ready.', 'note');
+            addChatMessage('bot', 'Okay, cancelled that one. 👍 Ask me whenever you\u2019re ready.', 'note');
         } else {
             addChatMessage('bot', '⚠ Network error: ' + e.message, 'note');
         }

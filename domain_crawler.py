@@ -350,9 +350,6 @@ def main():
         sys.exit(1)
     start_url = sys.argv[1]
     max_pages = int(sys.argv[2]) if len(sys.argv) > 2 else 0  # 0 = unlimited
-    # Optional 3rd arg: custom output xlsx path (used by the AI assistant so it
-    # never clobbers the UI's crawled_urls.xlsx / input_sites.xlsx).
-    custom_out = sys.argv[3] if len(sys.argv) > 3 else None
 
     t0 = time.time()
     urls = crawl(start_url, max_pages)
@@ -369,13 +366,9 @@ def main():
     print(f"\nDiscovered {len(final)} unique pages in {elapsed}s")
 
     df = pd.DataFrame({"URL": final})
-    if custom_out:
-        df.to_excel(custom_out, index=False)
-        print(f"Saved: {custom_out}")
-    else:
-        df.to_excel("crawled_urls.xlsx", index=False)
-        df.to_excel("input_sites.xlsx", index=False)
-        print("Saved: crawled_urls.xlsx (and input_sites.xlsx for validator)")
+    df.to_excel("crawled_urls.xlsx", index=False)
+    df.to_excel("input_sites.xlsx", index=False)
+    print("Saved: crawled_urls.xlsx (and input_sites.xlsx for validator)")
     sys.stdout.flush()
 
 

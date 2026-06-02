@@ -351,7 +351,7 @@
         .chat-icon-btn {
             background: var(--inset-bg); border: 1px solid var(--border); color: var(--text);
             width: 30px; height: 30px; border-radius: 8px; cursor: pointer; font-size: 0.9rem;
-            display: flex; align-items: center; justify-content: center;
+            display: flex; align-items; justify-content: center;
         }
         .chat-icon-btn:hover { border-color: var(--accent); }
 
@@ -408,6 +408,24 @@
             background: var(--inset-bg); border: 1px solid var(--border); color: var(--muted);
         }
         .chat-chip:hover { border-color: var(--accent); color: var(--text); }
+
+        /* Scrollable event parameter details */
+        .event-cell-container {
+            max-height: 180px;
+            overflow-y: auto;
+            width: 100%;
+            padding-right: 6px;
+        }
+        .event-cell-container::-webkit-scrollbar {
+            width: 4px;
+        }
+        .event-cell-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .event-cell-container::-webkit-scrollbar-thumb {
+            background: var(--scrollbar-thumb);
+            border-radius: 2px;
+        }
     </style>
     <script>
         (function () {
@@ -448,9 +466,19 @@
                 <button id="modeTealium" class="mode-btn active" onclick="setAuditMode('tealium')">Tealium / Adobe</button>
                 <button id="modeGA4" class="mode-btn" onclick="setAuditMode('ga4')">GA4 / GTM</button>
                 <button id="modePixels" class="mode-btn" onclick="setAuditMode('pixels')">Marketing Pixels</button>
+                <button id="modeClicks" class="mode-btn" onclick="setAuditMode('clicks')">Click Tracking</button>
             </div>
 
-            <div class="control-bar glass">
+            <div class="control-bar glass" style="margin-bottom:0; border-radius:16px 16px 0 0; padding-bottom:12px;">
+                <input type="text" id="singleUrlInput" class="sch-email" style="flex:3; min-width:300px;"
+                       placeholder="Paste a single URL for quick check (e.g. https://example.com)">
+                <button id="quickRunBtn" class="btn btn-primary"
+                        style="background: linear-gradient(135deg, #14b8a6, #8b5cf6); white-space:nowrap;">
+                    ⚡ Quick Run
+                </button>
+            </div>
+            <div style="text-align:center; color:var(--muted); font-size:0.7rem; font-weight:600; padding:6px 0; letter-spacing:1px;">— OR UPLOAD EXCEL —</div>
+            <div class="control-bar glass" style="border-radius:0 0 16px 16px; margin-top:0; padding-top:12px;">
                 <div id="uploadBoxManual" class="upload-box">
                     <p id="uploadTextManual">Drop Excel here or click to browse</p>
                     <input type="file" id="fileInputManual" class="hidden" accept=".xlsx,.xls">
@@ -489,6 +517,7 @@
                 <button id="dcModeTealium" class="mode-btn active" onclick="setDomainMode('tealium')">Tealium / Adobe</button>
                 <button id="dcModeGA4" class="mode-btn" onclick="setDomainMode('ga4')">GA4 / GTM</button>
                 <button id="dcModePixels" class="mode-btn" onclick="setDomainMode('pixels')">Marketing Pixels</button>
+                <button id="dcModeClicks" class="mode-btn" onclick="setDomainMode('clicks')">Click Tracking</button>
             </div>
 
             <div class="control-bar glass">
@@ -549,6 +578,8 @@
                 </div>
             </div>
         </div>
+
+
 
         <!-- SCHEDULER TAB -->
         <div id="tab-scheduler" class="tab-content">
