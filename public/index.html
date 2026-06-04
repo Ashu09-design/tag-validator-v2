@@ -387,6 +387,20 @@
             filter: brightness(1.1);
         }
         .btn-primary:disabled { background: #1e293b; color: #475569; cursor: not-allowed; box-shadow: none; }
+        /* Premium inline spinner on the active button while validating */
+        body.audit-running .btn-primary:disabled {
+            background: linear-gradient(135deg, var(--accent), #d946ef);
+            color: #fff; opacity: 0.95; box-shadow: 0 4px 18px rgba(99, 102, 241, 0.4);
+        }
+        body.audit-running .btn-primary:disabled::before {
+            content: '';
+            width: 14px; height: 14px; flex-shrink: 0;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: btnSpin 0.7s linear infinite;
+        }
+        @keyframes btnSpin { to { transform: rotate(360deg); } }
         .btn-download { background: rgba(6, 182, 212, 0.1); border: 1px solid rgba(6, 182, 212, 0.3); color: var(--teal); }
         .btn-download:hover { background: rgba(6, 182, 212, 0.2); box-shadow: 0 0 15px rgba(6, 182, 212, 0.25); }
         .btn-danger { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #f87171; padding: 12px 20px; }
@@ -394,12 +408,27 @@
 
         /* Progress Bar styles */
         .progress-section { display: flex; align-items: center; gap: 12px; flex: 2; min-width: 260px; }
-        .progress-track { flex: 1; height: 6px; background: var(--inset-bg); border-radius: 4px; overflow: hidden; }
-        .progress-fill { 
-            height: 100%; width: 0%; background: linear-gradient(90deg, var(--teal), #3b82f6, var(--accent)); 
-            background-size: 200% 200%;  transition: width 0.4s; 
+        .progress-track { flex: 1; height: 6px; background: var(--inset-bg); border-radius: 4px; overflow: hidden; position: relative; }
+        .progress-fill {
+            height: 100%; width: 0%; background: linear-gradient(90deg, var(--teal), #3b82f6, var(--accent));
+            background-size: 200% 200%; transition: width 0.4s;
+            position: relative; box-shadow: 0 0 12px var(--accent-glow);
         }
-        
+        body.audit-running .progress-fill {
+            background-size: 200% 100%;
+            animation: progressFlow 2s linear infinite;
+        }
+        /* moving sheen riding on top of the filled portion */
+        body.audit-running .progress-fill::after {
+            content: '';
+            position: absolute; inset: 0;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.55), transparent);
+            background-size: 50% 100%;
+            animation: progressSheen 1.4s ease-in-out infinite;
+        }
+        @keyframes progressFlow { 0% { background-position: 0% 50%; } 100% { background-position: 200% 50%; } }
+        @keyframes progressSheen { 0% { background-position: -60% 0; } 100% { background-position: 160% 0; } }
+
 
         /* Schedule Controls */
         .select-freq { 
@@ -448,6 +477,32 @@
             color: var(--muted);
             font-family: var(--font-mono);
             letter-spacing: 0.5px;
+            display: inline-flex; align-items: center; gap: 8px;
+        }
+        /* Live "scanning" pulse badge shown only while validating */
+        .console-title::after {
+            content: 'SCANNING';
+            font-size: 0.62rem; font-weight: 700; letter-spacing: 1px;
+            color: var(--teal);
+            padding: 2px 8px 2px 16px; border-radius: 20px;
+            background: rgba(6, 182, 212, 0.1);
+            border: 1px solid rgba(6, 182, 212, 0.25);
+            position: relative;
+            max-width: 0; padding-left: 0; padding-right: 0; opacity: 0; overflow: hidden;
+            transition: all 0.4s ease;
+        }
+        body.audit-running .console-title::after {
+            max-width: 140px; padding: 2px 8px 2px 18px; opacity: 1;
+        }
+        body.audit-running .console-title::before {
+            content: '';
+            width: 7px; height: 7px; border-radius: 50%;
+            background: var(--teal); box-shadow: 0 0 8px var(--teal);
+            animation: livePulse 1.2s ease-in-out infinite;
+        }
+        @keyframes livePulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50%      { opacity: 0.35; transform: scale(0.7); }
         }
         .log-box {
             background: transparent !important;
@@ -864,17 +919,17 @@
         /* Active Audit scanning class triggers */
         body.audit-running .crt-overlay {
             opacity: 1;
-            
+            animation: hudShimmer 6s ease-in-out infinite;
         }
-        
+
         body.audit-running .scanner-bar {
             opacity: 1;
-            
+            animation: scanSweep 2.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
         }
 
         body.audit-running .scope-grid {
             opacity: 1;
-            
+            animation: gridDrift 8s linear infinite;
         }
 
         body.audit-running .console-container::after,
@@ -882,18 +937,45 @@
             opacity: 1;
             background: linear-gradient(90deg, var(--teal), var(--accent), var(--pink), var(--teal));
             background-size: 300% 100%;
-            
+            animation: borderFlow 3s linear infinite;
         }
 
-        /* Subtle breathing animation for metrics card during audit */
+        /* Subtle breathing for metrics cards during audit */
         body.audit-running .stat {
-            
+            animation: statBreathe 2.4s ease-in-out infinite alternate;
         }
 
-        /* Fast background orb rotation/floating during audit validation */
+        /* Background orbs soften + drift while validating */
         body.audit-running .bg-orb {
-            
             filter: blur(60px);
+            animation: orbFloat 12s ease-in-out infinite alternate;
+        }
+
+        @keyframes scanSweep {
+            0%   { top: -80px; opacity: 0; }
+            8%   { opacity: 1; }
+            92%  { opacity: 1; }
+            100% { top: 100%; opacity: 0; }
+        }
+        @keyframes hudShimmer {
+            0%, 100% { background-position: 0 0, 0 0; opacity: 0.7; }
+            50%      { background-position: 0 0, 0 6px; opacity: 1; }
+        }
+        @keyframes borderFlow {
+            0%   { background-position: 0% 50%; }
+            100% { background-position: 300% 50%; }
+        }
+        @keyframes gridDrift {
+            0%   { background-position: 0 0; }
+            100% { background-position: 16px 16px; }
+        }
+        @keyframes statBreathe {
+            from { transform: translateY(0); box-shadow: var(--shadow); }
+            to   { transform: translateY(-2px); box-shadow: var(--shadow), 0 8px 24px var(--accent-glow); }
+        }
+        @keyframes orbFloat {
+            from { transform: translate(0, 0) scale(1); }
+            to   { transform: translate(30px, -20px) scale(1.08); }
         }
 
         
