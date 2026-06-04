@@ -95,6 +95,26 @@ MARKETING_PIXELS = {
     "Yahoo / Verizon": ["analytics.yahoo.com", "sp.analytics.yahoo.com"],
 }
 
+# JS global objects created by marketing pixel libraries.
+# Used as a fallback: if CDP/Performance missed the beacon but the vendor
+# library loaded and initialised, we detect it via these globals.
+PIXEL_JS_GLOBALS = {
+    "Meta / Facebook Pixel": ["fbq", "_fbq"],
+    "Google Ads": ["gtag", "google_trackConversion"],
+    "LinkedIn Insight": ["_linkedin_data_partner_ids", "lintrk"],
+    "TikTok Pixel": ["ttq"],
+    "X / Twitter Pixel": ["twq"],
+    "Pinterest Tag": ["pintrk"],
+    "Snapchat Pixel": ["snaptr"],
+    "Microsoft / Bing UET": ["UET", "uetq"],
+    "Criteo": ["criteo_q"],
+    "Reddit Pixel": ["rdt"],
+    "Quora Pixel": ["qp"],
+    "Taboola": ["_tfa"],
+    "Outbrain": ["obApi"],
+    "Amazon Ads": ["amzn"],
+}
+
 
 def detect_marketing_pixels(url):
     """Return the set of marketing pixel names matched by a request URL."""
@@ -251,13 +271,38 @@ def _host_of(url):
         return ""
 
 
+# Well-known multi-part TLDs where the registrable domain is 3+ parts.
+_MULTI_TLDS = {
+    "co.uk", "co.jp", "co.kr", "co.in", "co.za", "co.nz", "co.il",
+    "com.au", "com.br", "com.cn", "com.mx", "com.sg", "com.hk", "com.tw",
+    "com.ar", "com.tr", "com.my", "com.ph", "com.vn", "com.co", "com.pe",
+    "org.uk", "org.au", "net.au", "ac.uk", "gov.uk",
+    "ne.jp", "or.jp", "ac.jp",
+}
+
+
 def _cookie_domain_for(url):
+    """Extract the registrable domain (eTLD+1) for setting cookies.
+
+    OneTrust reads its consent cookie from the root domain. If the page is on
+    shop.example.com but we set the cookie on .shop.example.com, the CMP never
+    sees it and all pixels fire regardless of the chosen scenario.
+    """
     h = _host_of(url)
     if not h:
         return None
     if h.startswith("www."):
         h = h[4:]
-    return "." + h
+    if h.replace(".", "").isdigit() or ":" in h:
+        return "." + h
+    parts = h.split(".")
+    if len(parts) <= 2:
+        return "." + h
+    for n in (3, 2):
+        tld_candidate = ".".join(parts[-(n - 1):])
+        if tld_candidate in _MULTI_TLDS and len(parts) > n:
+            return "." + ".".join(parts[-(n + 1):])
+    return "." + ".".join(parts[-2:])
 
 
 async def accept_cookies(page):
@@ -528,11 +573,16 @@ async def validate_tags(browser, url, index, total):
     return results
 
 async def _capture_pixels_for_scenario(browser, url, scenario):
-    """Load the URL once under a single OneTrust consent `scenario` and return
-    {pixel_name: {"count": int, "sources": set()}} for every marketing pixel
-    that fired. Source is attributed from the JS initiator stack via CDP."""
+    """Load the URL under a single OneTrust consent `scenario` and return
+    {pixel_name: {"count": int, "sources": {}, "ids": set()}} for every
+    marketing pixel that fired.
+
+    Captures via THREE independent paths (CDP + Playwright + Performance API)
+    and uses JS global detection as a last-resort fallback.
+    Source is attributed from the JS initiator stack via CDP."""
     page_host = _host_of(url)
-    cdp_records = []           # list of {"url", "init":[...], "type"}
+    cdp_records = []           # list of {"url", "init":[...], "type", "post"}
+    pw_seen_urls = set()       # Playwright backup: dedup set
     context = None
     try:
         context = await browser.new_context(
@@ -564,7 +614,8 @@ async def _capture_pixels_for_scenario(browser, url, scenario):
         page = await context.new_page()
         await stealth_obj.apply_stealth_async(page)
 
-        # CDP: capture each request URL with its JS initiator stack
+        # ---- CDP: capture each request URL with its JS initiator stack ----
+        cdp = None
         try:
             cdp = await context.new_cdp_session(page)
             await cdp.send("Network.enable")
@@ -597,6 +648,24 @@ async def _capture_pixels_for_scenario(browser, url, scenario):
         except Exception:
             pass
 
+        # ---- Playwright-level backup capture (catches iframes/workers) ----
+        def on_pw_request(request):
+            try:
+                req_url = request.url
+                if req_url and req_url not in pw_seen_urls:
+                    pw_seen_urls.add(req_url)
+                    pd_str = ""
+                    try: pd_str = request.post_data or ""
+                    except: pass
+                    if not any(r["url"] == req_url for r in cdp_records[-50:]):
+                        cdp_records.append({"url": req_url, "init": [],
+                                            "type": "pw_backup",
+                                            "post": pd_str})
+            except Exception:
+                pass
+        try: page.on("request", on_pw_request)
+        except Exception: pass
+
         # ---- PASS 1: open the page and APPLY the consent choice ----
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -617,11 +686,12 @@ async def _capture_pixels_for_scenario(browser, url, scenario):
         except: pass
         await asyncio.sleep(3)
 
+        # ---- Mark the boundary between PASS 1 and PASS 2 ----
+        # We keep PASS 1 records (some pixels only fire on first visit) and
+        # also capture PASS 2 (return visit with consent state baked in).
+        pass1_count = len(cdp_records)
+
         # ---- PASS 2: RELOAD with the consent state now in effect ----
-        # Only requests from here on are counted. This is what a real user
-        # sees on their next page view after choosing consent, so a site
-        # that respects consent will NOT fire marketing pixels after Reject.
-        cdp_records.clear()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         except Exception:
@@ -640,7 +710,52 @@ async def _capture_pixels_for_scenario(browser, url, scenario):
         try:
             await page.wait_for_load_state("networkidle", timeout=12000)
         except: pass
-        await asyncio.sleep(7)
+        await asyncio.sleep(10)    # extended wait for late-loading deferred pixels
+
+        # One more networkidle attempt to catch very late beacons
+        try:
+            await page.wait_for_load_state("networkidle", timeout=5000)
+        except: pass
+
+        # ---- FALLBACK: Performance API ----
+        # Image beacons and CSS-loaded tracking pixels may not appear in CDP
+        # but ARE visible via the Performance Resource Timing API.
+        try:
+            perf_urls = await page.evaluate(
+                "performance.getEntriesByType('resource').map(r => r.name)")
+            for pu in (perf_urls or []):
+                if pu and pu not in pw_seen_urls:
+                    pw_seen_urls.add(pu)
+                    if detect_marketing_pixels(pu):
+                        if not any(r["url"] == pu for r in cdp_records[-100:]):
+                            cdp_records.append({"url": pu, "init": [],
+                                                "type": "perf_api",
+                                                "post": ""})
+        except Exception:
+            pass
+
+        # ---- FALLBACK: JS global pixel objects ----
+        # Some pixels load entirely via inline scripts (createElement('img'),
+        # sendBeacon) which may bypass CDP. If the vendor library initialised,
+        # its global object (fbq, ttq, snaptr…) will exist on window.
+        try:
+            js_code = f"""(() => {{
+                const found = [];
+                {'; '.join(
+                    f"if (typeof window.{g} !== 'undefined') found.push('{pname}')"
+                    for pname, globals_list in PIXEL_JS_GLOBALS.items()
+                    for g in globals_list
+                )};
+                return [...new Set(found)];
+            }})()"""
+            js_detected = await page.evaluate(js_code)
+            for pname in (js_detected or []):
+                cdp_records.append({
+                    "url": f"__js_global_detected__/{pname.replace(' ', '_').replace('/', '_')}",
+                    "init": [], "type": "js_global", "post": ""
+                })
+        except Exception:
+            pass
 
         # Build the request->initiator graph (first load of each script wins)
         init_map = {}
@@ -650,22 +765,50 @@ async def _capture_pixels_for_scenario(browser, url, scenario):
 
         pixels = {}
         for rec in cdp_records:
-            for pname in detect_marketing_pixels(rec["url"]):
+            req_url = rec["url"]
+            # Handle JS global detection synthetic records
+            if req_url.startswith("__js_global_detected__/"):
+                raw_name = req_url.split("/", 1)[1].replace("_", " ")
+                matched_name = None
+                for pname in PIXEL_JS_GLOBALS:
+                    norm = pname.replace(" ", " ").replace("/", " ")
+                    if raw_name.replace("_", " ") in norm or norm in raw_name.replace("_", " "):
+                        matched_name = pname
+                        break
+                if not matched_name:
+                    for pname in PIXEL_JS_GLOBALS:
+                        if pname.replace(" ", "_").replace("/", "_") == raw_name:
+                            matched_name = pname
+                            break
+                if matched_name:
+                    bucket = pixels.setdefault(
+                        matched_name, {"count": 0, "sources": {}, "ids": set()})
+                    if bucket["count"] == 0:
+                        bucket["count"] = 1
+                        bucket["sources"]["Detected (JS)"] = 1
+                continue
+
+            for pname in detect_marketing_pixels(req_url):
                 bucket = pixels.setdefault(
                     pname, {"count": 0, "sources": {}, "ids": set()})
                 bucket["count"] += 1
 
-                pid = extract_pixel_id(pname, rec["url"], rec.get("post", ""))
+                pid = extract_pixel_id(pname, req_url, rec.get("post", ""))
                 if pid:
                     bucket["ids"].add(pid)
 
                 if rec.get("type") == "parser":
                     # Beacon hardcoded directly in the page HTML markup
                     src = "Hardcoded"
+                elif rec.get("type") in ("pw_backup", "perf_api"):
+                    # Fallback captures don't have initiator stacks
+                    src = "Hardcoded"
                 else:
                     src = resolve_source(rec["init"], init_map, page_host)
                 bucket["sources"][src] = bucket["sources"].get(src, 0) + 1
 
+        try: page.remove_listener("request", on_pw_request)
+        except: pass
         await page.close()
     except Exception:
         pixels = locals().get("pixels", {})
