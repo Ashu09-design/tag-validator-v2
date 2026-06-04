@@ -11,13 +11,34 @@ function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+function colorizeLogLines(logs) {
+    return logs.map(l => {
+        const text = String(l);
+        let colorStyle = '';
+        if (text.includes('ERROR') || text.includes('failed') || text.includes('failed with code') || text.includes('rejected')) {
+            colorStyle = 'color: #f87171; text-shadow: 0 0 6px rgba(248, 113, 113, 0.4);';
+        } else if (text.includes('WARNING') || text.includes('WARN')) {
+            colorStyle = 'color: #fbbf24; text-shadow: 0 0 6px rgba(251, 191, 36, 0.4);';
+        } else if (text.includes('SUCCESS') || text.includes('Finished') || text.includes('Completed') || text.includes('Saved report')) {
+            colorStyle = 'color: #34d399; text-shadow: 0 0 6px rgba(52, 211, 153, 0.4);';
+        } else if (text.includes('[Crawl]') || text.includes('CRAWLING') || text.includes('Discovering')) {
+            colorStyle = 'color: #22d3ee; text-shadow: 0 0 6px rgba(34, 211, 238, 0.4);';
+        } else if (text.includes('[Audit]') || text.includes('Auditing') || text.includes('Quick Run:')) {
+            colorStyle = 'color: #c084fc; text-shadow: 0 0 6px rgba(192, 132, 252, 0.4);';
+        }
+        
+        const styleAttr = colorStyle ? ` style="${colorStyle}"` : '';
+        return `<div${styleAttr}>${escapeHtml(text)}</div>`;
+    }).join('');
+}
+
 function formatSingleGa4Event(e) {
     if (!e) return '<span style="color:#64748b">--</span>';
     const measId = e.measurement_id ? `<span class="badge" style="background:rgba(59,130,246,0.12);color:#60a5fa;border:1px solid rgba(59,130,246,0.35);margin-bottom:4px;display:inline-block;font-family:monospace;font-size:0.65rem;">${e.measurement_id}</span>` : '';
     let s = `<div style="margin-bottom:4px;">${measId}<br><b style="color:#4ade80">${e.event}</b></div>`;
     const pkeys = Object.keys(e.params || {});
     if (pkeys.length) {
-        s += `<div class="event-params" style="max-height:90px; overflow-y:auto; padding:6px; background:rgba(15,23,42,0.6); border:1px solid rgba(255,255,255,0.08); border-radius:6px; font-family:var(--font-mono); font-size:0.7rem; line-height:1.3;">` + 
+        s += `<div class="event-params">` + 
              pkeys.map(k => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${k}</span>: <span style="color:#38bdf8">${e.params[k]}</span></div>`).join('') + 
              `</div>`;
     }
@@ -168,8 +189,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const poll = setInterval(async () => {
             const r = await fetch('/api/tag-validator/status');
             const d = await r.json();
+            document.body.classList.toggle('audit-running', d.running);
             const logs = d.logs.filter(l => !l.includes('DeprecationWarning') && !l.includes('Pyarrow') && l.trim());
-            logBox.innerHTML = logs.map(l => '<div>' + l + '</div>').join('');
+            logBox.innerHTML = colorizeLogLines(logs);
             logBox.scrollTop = logBox.scrollHeight;
 
             const last = [...logs].reverse().find(l => l.match(/\[\d+\/\d+\]/));
@@ -183,6 +205,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (!d.running) {
+                document.body.classList.remove('audit-running');
                 clearInterval(poll);
                 runBtn.disabled = false;
                 runBtn.innerText = d.cancelled ? 'Cancelled — Run Again' : 'Run Again';
@@ -228,8 +251,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const poll = setInterval(async () => {
             const r = await fetch('/api/tag-validator/status');
             const d = await r.json();
+            document.body.classList.toggle('audit-running', d.running);
             const logs = d.logs.filter(l => !l.includes('DeprecationWarning') && !l.includes('Pyarrow') && l.trim());
-            logBox.innerHTML = logs.map(l => '<div>' + l + '</div>').join('');
+            logBox.innerHTML = colorizeLogLines(logs);
             logBox.scrollTop = logBox.scrollHeight;
 
             const last = [...logs].reverse().find(l => l.match(/\[\d+\/\d+\]/));
@@ -243,6 +267,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (!d.running) {
+                document.body.classList.remove('audit-running');
                 clearInterval(poll);
                 quickRunBtn.disabled = false;
                 quickRunBtn.innerText = '⚡ Quick Run';
@@ -513,7 +538,7 @@ function renderTable() {
                             Object.keys(c.props || {}).forEach(k => { items.push({ k, v: c.props[k] }); });
                             
                             if (items.length) {
-                                s += `<div class="event-params" style="max-height:100px; overflow-y:auto; margin-top:4px; padding:6px; background:rgba(15,23,42,0.6); border:1px solid rgba(255,255,255,0.08); border-radius:6px; font-family:var(--font-mono); font-size:0.7rem; line-height:1.3;">` + 
+                                s += `<div class="event-params">` + 
                                      items.map(item => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${item.k}</span>: <span style="color:#fb923c">${item.v}</span></div>`).join('') + 
                                      `</div>`;
                             }
@@ -784,8 +809,9 @@ function pollDomainStatus(expectValidation) {
     dcPollHandle = setInterval(async () => {
         const r = await fetch('/api/tag-validator/status');
         const d = await r.json();
+        document.body.classList.toggle('audit-running', d.running);
         const logs = (d.logs || []).filter(l => !l.includes('DeprecationWarning') && !l.includes('Pyarrow') && l.trim());
-        logBox.innerHTML = logs.map(l => '<div>' + escapeHtml(l) + '</div>').join('');
+        logBox.innerHTML = colorizeLogLines(logs);
         logBox.scrollTop = logBox.scrollHeight;
 
         const last = [...logs].reverse().find(l => l.match(/\[\d+\/\d+\]/));
@@ -805,6 +831,7 @@ function pollDomainStatus(expectValidation) {
         }
 
         if (!d.running) {
+            document.body.classList.remove('audit-running');
             clearInterval(dcPollHandle);
             dcPollHandle = null;
 
@@ -838,7 +865,7 @@ async function loadDcCrawledUrls() {
         return;
     }
     body.innerHTML = urls.map((u, i) =>
-        `<tr><td>${i + 1}</td><td class="url-col" title="${escapeHtml(u)}"><a href="${escapeHtml(u)}" target="_blank" style="color:#a78bfa; text-decoration:none;">${escapeHtml(u)}</a></td></tr>`
+        `<tr><td>${i + 1}</td><td class="url-col" title="${escapeHtml(u)}"><a href="${escapeHtml(u)}" style="color:#a78bfa; text-decoration:none;">${escapeHtml(u)}</a></td></tr>`
     ).join('');
     document.getElementById('downloadUrlsBtn').classList.remove('hidden');
     document.getElementById('validateDiscoveredBtn').classList.remove('hidden');
@@ -1005,7 +1032,7 @@ function renderDcTable() {
                             Object.keys(c.props || {}).forEach(k => { items.push({ k, v: c.props[k] }); });
                             
                             if (items.length) {
-                                s += `<div class="event-params" style="max-height:100px; overflow-y:auto; margin-top:4px; padding:6px; background:rgba(15,23,42,0.6); border:1px solid rgba(255,255,255,0.08); border-radius:6px; font-family:var(--font-mono); font-size:0.7rem; line-height:1.3;">` + 
+                                s += `<div class="event-params">` + 
                                      items.map(item => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${item.k}</span>: <span style="color:#fb923c">${item.v}</span></div>`).join('') + 
                                      `</div>`;
                             }
@@ -1145,10 +1172,10 @@ function renderMarkdown(src) {
     s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
     s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
     s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]+)\)/g,
-        '<a href="$2" target="_blank" rel="noopener">$1</a>');
+        '<a href="$2" rel="noopener">$1</a>');
     // auto-linkify bare assistant download paths
     s = s.replace(/(?<!["'>= ])(\/api\/ai\/download\/(?:results|crawled))/g,
-        '<a href="$1" target="_blank" rel="noopener">Download file</a>');
+        '<a href="$1" rel="noopener">Download file</a>');
     s = s.replace(/(?:^|\n)((?:[-*] .+(?:\n|$))+)/g, (m, blk) => {
         const items = blk.trim().split('\n').map(l => `<li>${l.replace(/^[-*]\s+/, '')}</li>`).join('');
         return `<ul style="margin:6px 0 6px 18px">${items}</ul>`;
@@ -1169,6 +1196,8 @@ function addChatMessage(role, content, type) {
 }
 
 function showChatTyping() {
+    const panel = document.getElementById('chatPanel');
+    if (panel) panel.classList.add('agent-talking');
     const body = document.getElementById('chatBody');
     const div = document.createElement('div');
     div.className = 'chat-typing';
@@ -1178,6 +1207,8 @@ function showChatTyping() {
     body.scrollTop = body.scrollHeight;
 }
 function hideChatTyping() {
+    const panel = document.getElementById('chatPanel');
+    if (panel) panel.classList.remove('agent-talking');
     const t = document.getElementById('chatTyping');
     if (t) t.remove();
 }
