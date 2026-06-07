@@ -16,3 +16,10 @@ ai_results.xlsx
 ai_results.json
 ai_crawled.xlsx
 package-lock.json
+
+# local internal + generated outputs
+.claude/
+crawled_urls.xlsx
+sdr_results.json
+sdr_results.xlsx
+click_results.json
