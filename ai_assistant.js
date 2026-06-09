@@ -2,7 +2,7 @@
 // Conversational layer over the Tag Validator. The LLM calls tools that run
 // the same Python validators / crawler used by the UI — but against its own
 // set of files (ai_*.xlsx) so it never clobbers a manual UI run.
-// Supports 5 free AI providers in a fallback chain: Groq → Gemini → Together AI → OpenRouter → Cerebras
+// Supports 2 free AI providers in a fallback chain: Groq → Gemini
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -16,21 +16,6 @@ const GROQ_MODEL = 'openai/gpt-oss-120b';
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
 const GEMINI_MODEL = 'gemini-2.0-flash';
 
-// --- Provider 3: Together AI (free tier — 60 req/min) ---
-// Get key at: api.together.xyz → Settings → API Keys
-const TOGETHER_URL = 'https://api.together.xyz/v1/chat/completions';
-const TOGETHER_MODEL = 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
-
-// --- Provider 4: OpenRouter (free models available) ---
-// Get key at: openrouter.ai → Keys
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const OPENROUTER_MODEL = 'google/gemini-2.0-flash:free';
-
-// --- Provider 5: Cerebras (ultra-fast, free tier) ---
-// Get key at: cloud.cerebras.ai → API Keys
-const CEREBRAS_URL = 'https://api.cerebras.ai/v1/chat/completions';
-const CEREBRAS_MODEL = 'gpt-oss-120b';
-
 module.exports = function registerAiRoutes(app, ctx) {
     const ROOT = ctx.rootDir;
     const AI_CONFIG_FILE = path.join(ROOT, 'ai_config.json');
@@ -43,7 +28,7 @@ module.exports = function registerAiRoutes(app, ctx) {
     // Only one AI-triggered Python job at a time.
     let aiBusy = false;
 
-    // ---- API keys (5-provider fallback chain) ----
+    // ---- API keys (2-provider fallback chain) ----
     function loadConfig() {
         if (fs.existsSync(AI_CONFIG_FILE)) {
             try { return JSON.parse(fs.readFileSync(AI_CONFIG_FILE, 'utf8')) || {}; }
@@ -59,21 +44,9 @@ module.exports = function registerAiRoutes(app, ctx) {
         const c = loadConfig();
         return (String(c.geminiKey || process.env.GEMINI_API_KEY || '').trim()) || null;
     }
-    function loadTogetherKey() {
-        const c = loadConfig();
-        return (String(c.togetherKey || process.env.TOGETHER_API_KEY || '').trim()) || null;
-    }
-    function loadOpenRouterKey() {
-        const c = loadConfig();
-        return (String(c.openrouterKey || process.env.OPENROUTER_API_KEY || '').trim()) || null;
-    }
-    function loadCerebrasKey() {
-        const c = loadConfig();
-        return (String(c.cerebrasKey || process.env.CEREBRAS_API_KEY || '').trim()) || null;
-    }
 
     function anyKeyConfigured() {
-        return !!(loadGroqKey() || loadGeminiKey() || loadTogetherKey() || loadOpenRouterKey() || loadCerebrasKey());
+        return !!(loadGroqKey() || loadGeminiKey());
     }
 
     app.get('/api/ai/config', (req, res) => {
@@ -81,29 +54,21 @@ module.exports = function registerAiRoutes(app, ctx) {
             configured: anyKeyConfigured(),
             groq: !!loadGroqKey(),
             gemini: !!loadGeminiKey(),
-            together: !!loadTogetherKey(),
-            openrouter: !!loadOpenRouterKey(),
-            cerebras: !!loadCerebrasKey(),
         });
     });
 
     app.post('/api/ai/config', (req, res) => {
-        const { apiKey, geminiKey, togetherKey, openrouterKey, cerebrasKey } = req.body || {};
-        const keys = [apiKey, geminiKey, togetherKey, openrouterKey, cerebrasKey];
+        const { apiKey, geminiKey } = req.body || {};
+        const keys = [apiKey, geminiKey];
         if (!keys.some(k => typeof k === 'string' && k.trim()))
             return res.status(400).json({ error: 'Provide at least one API key' });
         const c = loadConfig();
         if (typeof apiKey === 'string' && apiKey.trim()) c.apiKey = apiKey.trim();
         if (typeof geminiKey === 'string' && geminiKey.trim()) c.geminiKey = geminiKey.trim();
-        if (typeof togetherKey === 'string' && togetherKey.trim()) c.togetherKey = togetherKey.trim();
-        if (typeof openrouterKey === 'string' && openrouterKey.trim()) c.openrouterKey = openrouterKey.trim();
-        if (typeof cerebrasKey === 'string' && cerebrasKey.trim()) c.cerebrasKey = cerebrasKey.trim();
         fs.writeFileSync(AI_CONFIG_FILE, JSON.stringify(c, null, 2));
         res.json({
             success: true,
             groq: !!loadGroqKey(), gemini: !!loadGeminiKey(),
-            together: !!loadTogetherKey(), openrouter: !!loadOpenRouterKey(),
-            cerebras: !!loadCerebrasKey(),
         });
     });
 
@@ -410,7 +375,7 @@ Be helpful, accurate, and human.`;
         return resp.json();
     }
 
-    // Try providers in chain: Groq → Gemini → Together AI → OpenRouter → Cerebras.
+    // Try providers in chain: Groq → Gemini.
     // Automatically falls back when any provider is rate-limited or failing.
     async function callLLM(messages, signal) {
         const providers = [];
@@ -418,12 +383,6 @@ Be helpful, accurate, and human.`;
         if (gk) providers.push({ name: 'Groq', url: GROQ_URL, model: GROQ_MODEL, key: gk });
         const gm = loadGeminiKey();
         if (gm) providers.push({ name: 'Gemini', url: GEMINI_URL, model: GEMINI_MODEL, key: gm });
-        const tk = loadTogetherKey();
-        if (tk) providers.push({ name: 'Together', url: TOGETHER_URL, model: TOGETHER_MODEL, key: tk });
-        const ork = loadOpenRouterKey();
-        if (ork) providers.push({ name: 'OpenRouter', url: OPENROUTER_URL, model: OPENROUTER_MODEL, key: ork });
-        const ck = loadCerebrasKey();
-        if (ck) providers.push({ name: 'Cerebras', url: CEREBRAS_URL, model: CEREBRAS_MODEL, key: ck });
         if (!providers.length) throw new Error('No LLM API key set.');
 
         let lastErr;
@@ -444,7 +403,7 @@ Be helpful, accurate, and human.`;
 
     app.post('/api/ai/chat', async (req, res) => {
         if (!anyKeyConfigured())
-            return res.status(400).json({ error: 'No API key set. Open AI Settings and add at least one API key (Groq, Gemini, Together, OpenRouter, or Cerebras).' });
+            return res.status(400).json({ error: 'No API key set. Open AI Settings and add at least one API key (Groq or Gemini).' });
         if (aiBusy)
             return res.status(409).json({ error: 'The assistant is already running an audit. Please wait for it to finish.' });
 

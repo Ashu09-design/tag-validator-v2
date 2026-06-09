@@ -1272,9 +1272,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 const parts = [];
                 if (d.groq) parts.push('Groq ✅');
                 if (d.gemini) parts.push('Gemini ✅');
-                if (d.together) parts.push('Together ✅');
-                if (d.openrouter) parts.push('OpenRouter ✅');
-                if (d.cerebras) parts.push('Cerebras ✅');
                 el.innerHTML = 'Assistant ready — ' + parts.join(' · ');
             }
         } catch { /* ignore */ }
@@ -1324,25 +1321,16 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('saveGroqBtn').onclick = async () => {
         const apiKey = document.getElementById('groqKeyInput').value.trim();
         const geminiKey = document.getElementById('geminiKeyInput').value.trim();
-        const togetherKey = document.getElementById('togetherKeyInput').value.trim();
-        const openrouterKey = document.getElementById('openrouterKeyInput').value.trim();
-        const cerebrasKey = document.getElementById('cerebrasKeyInput').value.trim();
-        if (!apiKey && !geminiKey && !togetherKey && !openrouterKey && !cerebrasKey) return;
+        if (!apiKey && !geminiKey) return;
         const body = {};
         if (apiKey) body.apiKey = apiKey;
         if (geminiKey) body.geminiKey = geminiKey;
-        if (togetherKey) body.togetherKey = togetherKey;
-        if (openrouterKey) body.openrouterKey = openrouterKey;
-        if (cerebrasKey) body.cerebrasKey = cerebrasKey;
         const r = await fetch('/api/ai/config', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
         document.getElementById('groqKeyInput').value = '';
         document.getElementById('geminiKeyInput').value = '';
-        document.getElementById('togetherKeyInput').value = '';
-        document.getElementById('openrouterKeyInput').value = '';
-        document.getElementById('cerebrasKeyInput').value = '';
         if (r.ok) document.getElementById('chatSettings').classList.remove('open');
         refreshGroqState();
     };
@@ -1350,9 +1338,6 @@ document.addEventListener('DOMContentLoaded', () => {
         await fetch('/api/ai/config', { method: 'DELETE' });
         document.getElementById('groqKeyInput').value = '';
         document.getElementById('geminiKeyInput').value = '';
-        document.getElementById('togetherKeyInput').value = '';
-        document.getElementById('openrouterKeyInput').value = '';
-        document.getElementById('cerebrasKeyInput').value = '';
         refreshGroqState();
     };
 
