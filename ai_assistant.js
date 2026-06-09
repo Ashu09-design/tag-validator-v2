@@ -24,12 +24,12 @@ const TOGETHER_MODEL = 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
 // --- Provider 4: OpenRouter (free models available) ---
 // Get key at: openrouter.ai → Keys
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const OPENROUTER_MODEL = 'meta-llama/llama-4-maverick:free';
+const OPENROUTER_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
 
 // --- Provider 5: Cerebras (ultra-fast, free tier) ---
 // Get key at: cloud.cerebras.ai → API Keys
 const CEREBRAS_URL = 'https://api.cerebras.ai/v1/chat/completions';
-const CEREBRAS_MODEL = 'llama-3.3-70b';
+const CEREBRAS_MODEL = 'gpt-oss-120b';
 
 module.exports = function registerAiRoutes(app, ctx) {
     const ROOT = ctx.rootDir;
