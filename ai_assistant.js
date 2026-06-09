@@ -368,8 +368,11 @@ Be helpful, accurate, and human.`;
             }
             if (resp.status === 401)
                 throw new Error(`${provider.name} rejected the API key — check it in AI Settings.`);
-            if (resp.status === 429)
-                throw new Error(`${provider.name} rate limit hit.`);
+            if (resp.status === 429) {
+                const err = new Error(`${provider.name} rate limit hit.`);
+                err.retryable = true;   // momentary RPM burst — worth one retry
+                throw err;
+            }
             throw new Error(`${provider.name} API error ${resp.status}: ${body.slice(0, 200)}`);
         }
         return resp.json();
@@ -385,17 +388,28 @@ Be helpful, accurate, and human.`;
         if (gm) providers.push({ name: 'Gemini', url: GEMINI_URL, model: GEMINI_MODEL, key: gm });
         if (!providers.length) throw new Error('No LLM API key set.');
 
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         let lastErr;
         for (const provider of providers) {
-            try {
-                console.log(`[AI] Trying provider: ${provider.name}`);
-                const result = await callProvider(provider, messages, signal);
-                console.log(`[AI] ✅ ${provider.name} succeeded`);
-                return result;
-            } catch (e) {
-                if (e && e.name === 'AbortError') throw e;   // user cancelled
-                console.log(`[AI] ❌ ${provider.name} failed: ${e.message}`);
-                lastErr = e;   // this provider failed — try the next one
+            // Up to 2 attempts per provider: a momentary 429 (free-tier RPM
+            // burst) usually clears after a short wait, so retry once before
+            // falling through to the next provider.
+            for (let attempt = 0; attempt < 2; attempt++) {
+                try {
+                    console.log(`[AI] Trying provider: ${provider.name}${attempt ? ' (retry)' : ''}`);
+                    const result = await callProvider(provider, messages, signal);
+                    console.log(`[AI] ✅ ${provider.name} succeeded`);
+                    return result;
+                } catch (e) {
+                    if (e && e.name === 'AbortError') throw e;   // user cancelled
+                    console.log(`[AI] ❌ ${provider.name} failed: ${e.message}`);
+                    lastErr = e;
+                    if (e && e.retryable && attempt === 0) {
+                        await sleep(2500);   // brief backoff, then retry same provider
+                        continue;
+                    }
+                    break;   // non-retryable or already retried — next provider
+                }
             }
         }
         throw lastErr || new Error('All LLM providers failed.');
