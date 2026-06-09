@@ -248,6 +248,57 @@ module.exports = function registerAiRoutes(app, ctx) {
         return { error: 'Unknown tool: ' + name };
     }
 
+    function pruneToolResult(name, result) {
+        if (!result) return result;
+        if (name === 'validate_tags') {
+            const pruned = {
+                mode: result.mode,
+                count: result.count,
+                excel_download: result.excel_download
+            };
+            if (result.error) pruned.error = result.error;
+            if (Array.isArray(result.results)) {
+                pruned.results = result.results.map(row => {
+                    const cleanRow = {};
+                    for (const [k, v] of Object.entries(row)) {
+                        if (k === 'URL' || k === 'Error') {
+                            if (v) cleanRow[k] = v;
+                            continue;
+                        }
+                        if (v !== 'FAIL' && v !== '--' && v !== null && v !== undefined && String(v).trim() !== '') {
+                            cleanRow[k] = v;
+                        }
+                    }
+                    return cleanRow;
+                });
+            }
+            if (result.pixel_scenarios) {
+                const cleanScenarios = {};
+                for (const [scenario, pixels] of Object.entries(result.pixel_scenarios.scenarios || {})) {
+                    if (Array.isArray(pixels)) {
+                        const activePixels = pixels
+                            .filter(p => p.count > 0)
+                            .map(p => ({
+                                name: p.name,
+                                id: p.id,
+                                count: p.count,
+                                source: p.source
+                            }));
+                        if (activePixels.length > 0) {
+                            cleanScenarios[scenario] = activePixels;
+                        }
+                    }
+                }
+                pruned.pixel_scenarios = {
+                    compliance: result.pixel_scenarios.compliance || {},
+                    active_fires: cleanScenarios
+                };
+            }
+            return pruned;
+        }
+        return result;
+    }
+
     const SYSTEM_PROMPT = `You are "Tagly", the friendly AI assistant inside Tag Validator Pro — an expert web-analytics consultant (GA4, Google Tag Manager, Adobe Analytics, Tealium iQ, consent/CMPs, marketing pixels).
 
 STYLE — talk like a real human in a chat, not a formal assistant:
@@ -442,7 +493,7 @@ Be helpful, accurate, and human.`;
                     messages.push({
                         role: 'tool',
                         tool_call_id: tc.id,
-                        content: JSON.stringify(result).slice(0, 12000),
+                        content: JSON.stringify(pruneToolResult(tc.function.name, result)).slice(0, 4000),
                     });
                 }
             }
