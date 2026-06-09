@@ -369,8 +369,18 @@ Be helpful, accurate, and human.`;
             if (resp.status === 401)
                 throw new Error(`${provider.name} rejected the API key — check it in AI Settings.`);
             if (resp.status === 429) {
-                const err = new Error(`${provider.name} rate limit hit.`);
-                err.retryable = true;   // momentary RPM burst — worth one retry
+                // Surface the provider's actual limit reason (per-minute vs
+                // per-day quota) so the user knows whether to just wait a moment
+                // or has exhausted the daily free allowance.
+                let detail = '';
+                try {
+                    const p = JSON.parse(body);
+                    detail = (p && p.error && (p.error.message || p.error)) || '';
+                } catch { detail = body.slice(0, 200); }
+                const perDay = /per day|daily|TPD|RPD|quota/i.test(detail);
+                const err = new Error(
+                    `${provider.name} rate limit hit${detail ? ' — ' + String(detail).slice(0, 180) : '.'}`);
+                err.retryable = !perDay;   // retry only for momentary per-minute bursts
                 throw err;
             }
             throw new Error(`${provider.name} API error ${resp.status}: ${body.slice(0, 200)}`);
