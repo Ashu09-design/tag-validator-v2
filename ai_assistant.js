@@ -313,6 +313,10 @@ Be helpful, accurate, and human.`;
             .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
             .replace(/<\|python_tag\|>[\s\S]*$/i, '')
             .replace(/<function[\s\S]*$/i, '')
+            // Last-resort: strip a leaked raw-JSON tool call (```json fenced or
+            // bare) so the user never sees {"name":...,"arguments":...}.
+            .replace(/```(?:json)?\s*\{[\s\S]*?"arguments"[\s\S]*?\}\s*```/gi, '')
+            .replace(/\{[^{}]*"name"\s*:\s*"[a-zA-Z_]+"[\s\S]*?"arguments"\s*:\s*\{[\s\S]*?\}\s*\}/g, '')
             .trim() || "Sure — could you share the URL you'd like me to check?";
     }
 
@@ -325,6 +329,34 @@ Be helpful, accurate, and human.`;
         while ((m = re.exec(text)) !== null) {
             try {
                 JSON.parse(m[2]); // validate
+                calls.push({
+                    id: 'call_' + Math.random().toString(36).slice(2, 11),
+                    type: 'function',
+                    function: { name: m[1], arguments: m[2] },
+                });
+            } catch { /* skip malformed */ }
+        }
+        return calls;
+    }
+
+    const KNOWN_TOOLS = new Set(TOOLS.map(t => t.function.name));
+
+    // Some models (esp. via OpenAI-compat shims) leak a tool call as a raw JSON
+    // blob in the *content* — e.g. {"name":"validate_tags","arguments":{...}} —
+    // instead of using the proper tool_calls field. Detect and convert those so
+    // the audit actually runs instead of the JSON showing up in the chat.
+    function parseJsonToolCalls(text) {
+        const s = String(text || '').trim();
+        if (!s || !s.includes('"name"') || !s.includes('"arguments"')) return [];
+        const calls = [];
+        // Match {...,"name":"tool",...,"arguments":{...}...} objects anywhere in
+        // the text (handles ```json fences and plain JSON alike).
+        const re = /\{[^{}]*"name"\s*:\s*"([a-zA-Z_]+)"[\s\S]*?"arguments"\s*:\s*(\{[\s\S]*?\})\s*\}/g;
+        let m;
+        while ((m = re.exec(s)) !== null) {
+            if (!KNOWN_TOOLS.has(m[1])) continue;
+            try {
+                JSON.parse(m[2]); // validate arguments object
                 calls.push({
                     id: 'call_' + Math.random().toString(36).slice(2, 11),
                     type: 'function',
@@ -459,6 +491,16 @@ Be helpful, accurate, and human.`;
                 if (clientGone) return;
                 const msg = data.choices && data.choices[0] && data.choices[0].message;
                 if (!msg) throw new Error('Empty response from the model.');
+
+                // Recover tool calls the model leaked as raw JSON / <function=>
+                // text in the content instead of the proper tool_calls field.
+                if ((!msg.tool_calls || !msg.tool_calls.length) && typeof msg.content === 'string') {
+                    const leaked = parseJsonToolCalls(msg.content);
+                    if (leaked.length) {
+                        msg.tool_calls = leaked;
+                        msg.content = '';   // don't show the raw JSON to the user
+                    }
+                }
                 messages.push(msg);
 
                 if (!msg.tool_calls || !msg.tool_calls.length) {
