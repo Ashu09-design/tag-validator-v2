@@ -9,8 +9,10 @@ const { spawn } = require('child_process');
 const XLSX = require('xlsx');
 
 // --- Provider 1: Groq (primary) ---
+// llama-3.3-70b-versatile: reliable NATIVE tool-calling (no JSON leaking) and a
+// generous free tier — best free option for this assistant.
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'openai/gpt-oss-120b';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 // --- Provider 2: Google Gemini (fallback) ---
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
