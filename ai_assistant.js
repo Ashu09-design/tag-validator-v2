@@ -384,10 +384,15 @@ Be helpful, accurate, and human.`;
                     const p = JSON.parse(body);
                     detail = (p && p.error && (p.error.message || p.error)) || '';
                 } catch { detail = body.slice(0, 200); }
-                const perDay = /per day|daily|TPD|RPD|quota/i.test(detail);
+                const perDay = /per day|daily|TPD|RPD/i.test(detail);
                 const err = new Error(
                     `${provider.name} rate limit hit${detail ? ' — ' + String(detail).slice(0, 180) : '.'}`);
-                err.retryable = !perDay;   // retry only for momentary per-minute bursts
+                err.retryable = !perDay;   // per-minute (TPM/RPM) bursts auto-recover
+                // Honour the provider's suggested wait ("try again in 6.2s") so a
+                // rolling-window TPM limit clears before we retry. Cap at 20s.
+                const wait = /try again in ([\d.]+)\s*s/i.exec(detail);
+                err.retryAfterMs = Math.min(
+                    20000, Math.ceil((wait ? parseFloat(wait[1]) : 3) * 1000) + 500);
                 throw err;
             }
             throw new Error(`${provider.name} API error ${resp.status}: ${body.slice(0, 200)}`);
@@ -408,12 +413,12 @@ Be helpful, accurate, and human.`;
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         let lastErr;
         for (const provider of providers) {
-            // Up to 2 attempts per provider: a momentary 429 (free-tier RPM
-            // burst) usually clears after a short wait, so retry once before
-            // falling through to the next provider.
-            for (let attempt = 0; attempt < 2; attempt++) {
+            // Up to 3 attempts per provider: a momentary 429 (free-tier TPM/RPM
+            // burst) clears once the rolling window frees up, so wait the time
+            // the provider suggests and retry before falling to the next one.
+            for (let attempt = 0; attempt < 3; attempt++) {
                 try {
-                    console.log(`[AI] Trying provider: ${provider.name}${attempt ? ' (retry)' : ''}`);
+                    console.log(`[AI] Trying provider: ${provider.name}${attempt ? ` (retry ${attempt})` : ''}`);
                     const result = await callProvider(provider, messages, signal);
                     console.log(`[AI] ✅ ${provider.name} succeeded`);
                     return result;
@@ -421,11 +426,13 @@ Be helpful, accurate, and human.`;
                     if (e && e.name === 'AbortError') throw e;   // user cancelled
                     console.log(`[AI] ❌ ${provider.name} failed: ${e.message}`);
                     lastErr = e;
-                    if (e && e.retryable && attempt === 0) {
-                        await sleep(2500);   // brief backoff, then retry same provider
+                    if (e && e.retryable && attempt < 2) {
+                        const waitMs = e.retryAfterMs || 3000;
+                        console.log(`[AI] ⏳ waiting ${waitMs}ms then retrying ${provider.name}`);
+                        await sleep(waitMs);
                         continue;
                     }
-                    break;   // non-retryable or already retried — next provider
+                    break;   // non-retryable or out of retries — next provider
                 }
             }
         }
