@@ -24,7 +24,7 @@ const TOGETHER_MODEL = 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
 // --- Provider 4: OpenRouter (free models available) ---
 // Get key at: openrouter.ai → Keys
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const OPENROUTER_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
+const OPENROUTER_MODEL = 'google/gemini-2.0-flash:free';
 
 // --- Provider 5: Cerebras (ultra-fast, free tier) ---
 // Get key at: cloud.cerebras.ai → API Keys
