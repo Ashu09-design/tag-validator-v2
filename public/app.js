@@ -1272,6 +1272,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const parts = [];
                 if (d.groq) parts.push('Groq ✅');
                 if (d.gemini) parts.push('Gemini ✅');
+                if (d.openrouter) parts.push('OpenRouter ✅');
                 el.innerHTML = 'Assistant ready — ' + parts.join(' · ');
             }
         } catch { /* ignore */ }
@@ -1321,16 +1322,19 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('saveGroqBtn').onclick = async () => {
         const apiKey = document.getElementById('groqKeyInput').value.trim();
         const geminiKey = document.getElementById('geminiKeyInput').value.trim();
-        if (!apiKey && !geminiKey) return;
+        const openrouterKey = document.getElementById('openrouterKeyInput').value.trim();
+        if (!apiKey && !geminiKey && !openrouterKey) return;
         const body = {};
         if (apiKey) body.apiKey = apiKey;
         if (geminiKey) body.geminiKey = geminiKey;
+        if (openrouterKey) body.openrouterKey = openrouterKey;
         const r = await fetch('/api/ai/config', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
         document.getElementById('groqKeyInput').value = '';
         document.getElementById('geminiKeyInput').value = '';
+        document.getElementById('openrouterKeyInput').value = '';
         if (r.ok) document.getElementById('chatSettings').classList.remove('open');
         refreshGroqState();
     };
@@ -1338,6 +1342,7 @@ document.addEventListener('DOMContentLoaded', () => {
         await fetch('/api/ai/config', { method: 'DELETE' });
         document.getElementById('groqKeyInput').value = '';
         document.getElementById('geminiKeyInput').value = '';
+        document.getElementById('openrouterKeyInput').value = '';
         refreshGroqState();
     };
 

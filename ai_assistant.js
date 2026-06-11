@@ -2,21 +2,24 @@
 // Conversational layer over the Tag Validator. The LLM calls tools that run
 // the same Python validators / crawler used by the UI — but against its own
 // set of files (ai_*.xlsx) so it never clobbers a manual UI run.
-// Supports 2 free AI providers in a fallback chain: Groq → Gemini
+// Supports 3 free AI providers in a fallback chain: Groq → Gemini → OpenRouter
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const XLSX = require('xlsx');
 
 // --- Provider 1: Groq (primary) ---
-// llama-3.3-70b-versatile: reliable NATIVE tool-calling (no JSON leaking) and a
-// generous free tier — best free option for this assistant.
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 // --- Provider 2: Google Gemini (fallback) ---
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
 const GEMINI_MODEL = 'gemini-2.0-flash';
+
+// --- Provider 3: OpenRouter (2nd fallback) ---
+// Free tier models via OpenRouter — reliable when Groq/Gemini hit limits.
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
 
 module.exports = function registerAiRoutes(app, ctx) {
     const ROOT = ctx.rootDir;
@@ -46,9 +49,13 @@ module.exports = function registerAiRoutes(app, ctx) {
         const c = loadConfig();
         return (String(c.geminiKey || process.env.GEMINI_API_KEY || '').trim()) || null;
     }
+    function loadOpenRouterKey() {
+        const c = loadConfig();
+        return (String(c.openrouterKey || process.env.OPENROUTER_API_KEY || '').trim()) || null;
+    }
 
     function anyKeyConfigured() {
-        return !!(loadGroqKey() || loadGeminiKey());
+        return !!(loadGroqKey() || loadGeminiKey() || loadOpenRouterKey());
     }
 
     app.get('/api/ai/config', (req, res) => {
@@ -56,21 +63,23 @@ module.exports = function registerAiRoutes(app, ctx) {
             configured: anyKeyConfigured(),
             groq: !!loadGroqKey(),
             gemini: !!loadGeminiKey(),
+            openrouter: !!loadOpenRouterKey(),
         });
     });
 
     app.post('/api/ai/config', (req, res) => {
-        const { apiKey, geminiKey } = req.body || {};
-        const keys = [apiKey, geminiKey];
+        const { apiKey, geminiKey, openrouterKey } = req.body || {};
+        const keys = [apiKey, geminiKey, openrouterKey];
         if (!keys.some(k => typeof k === 'string' && k.trim()))
             return res.status(400).json({ error: 'Provide at least one API key' });
         const c = loadConfig();
         if (typeof apiKey === 'string' && apiKey.trim()) c.apiKey = apiKey.trim();
         if (typeof geminiKey === 'string' && geminiKey.trim()) c.geminiKey = geminiKey.trim();
+        if (typeof openrouterKey === 'string' && openrouterKey.trim()) c.openrouterKey = openrouterKey.trim();
         fs.writeFileSync(AI_CONFIG_FILE, JSON.stringify(c, null, 2));
         res.json({
             success: true,
-            groq: !!loadGroqKey(), gemini: !!loadGeminiKey(),
+            groq: !!loadGroqKey(), gemini: !!loadGeminiKey(), openrouter: !!loadOpenRouterKey(),
         });
     });
 
@@ -400,7 +409,7 @@ Be helpful, accurate, and human.`;
         return resp.json();
     }
 
-    // Try providers in chain: Groq → Gemini.
+    // Try providers in chain: Groq → Gemini → OpenRouter.
     // Automatically falls back when any provider is rate-limited or failing.
     async function callLLM(messages, signal) {
         const providers = [];
@@ -408,6 +417,8 @@ Be helpful, accurate, and human.`;
         if (gk) providers.push({ name: 'Groq', url: GROQ_URL, model: GROQ_MODEL, key: gk });
         const gm = loadGeminiKey();
         if (gm) providers.push({ name: 'Gemini', url: GEMINI_URL, model: GEMINI_MODEL, key: gm });
+        const ork = loadOpenRouterKey();
+        if (ork) providers.push({ name: 'OpenRouter', url: OPENROUTER_URL, model: OPENROUTER_MODEL, key: ork });
         if (!providers.length) throw new Error('No LLM API key set.');
 
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
