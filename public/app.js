@@ -513,9 +513,9 @@ function renderTable() {
                 html += '<div style="padding:16px;color:var(--muted)">No clickable elements found</div>';
             } else {
                 html += '<table style="width:100%;margin:0;font-size:0.75rem"><thead><tr>' +
-                    '<th style="width:30px">#</th><th>Element</th><th>Text</th><th>Type</th>' +
+                    '<th style="width:30px">#</th><th>Element</th><th>Text</th><th>Type</th><th>Zone</th>' +
                     '<th class="h-teal">GA4 Event 1</th><th class="h-teal">GA4 Event 2</th><th class="h-teal">GA4 Event 3</th>' +
-                    '<th class="h-adobe">Adobe / Other Calls</th></tr></thead><tbody>';
+                    '<th class="h-adobe">Adobe / Other Calls</th><th>Network</th></tr></thead><tbody>';
                 elems.forEach((el, j) => {
                     const ga4_1 = formatSingleGa4Event(el.ga4_events[0]);
                     const ga4_2 = formatSingleGa4Event(el.ga4_events[1]);
@@ -561,16 +561,29 @@ function renderTable() {
                     if (!combinedAdobeOther) combinedAdobeOther = '<span style="color:#64748b">--</span>';
 
                     const elLabel = el.element.id ? '#' + el.element.id : el.element.selector.substring(0, 40);
-                    const trackIcon = el.has_tracking ? '✅' : '⚠️';
+                    const trackIcon = el.skipped ? '⏭️' : (el.has_tracking ? '✅' : '⚠️');
+                    const zone = el.element.zone || 'body';
+                    const netReqs = el.network_requests || [];
+                    const netCount = el.network_count || netReqs.length;
+                    const netId = detailId + '-net-' + j;
+                    const escUrl = (u) => String(u).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    const netCell = netCount
+                        ? `<span class="badge b-count" style="cursor:pointer" onclick="event.stopPropagation();document.getElementById('${netId}').classList.toggle('hidden')">${netCount} req ▾</span>` +
+                          `<div id="${netId}" class="hidden" style="max-height:220px;overflow:auto;margin-top:6px;text-align:left">` +
+                          netReqs.map(nr => `<div class="mono" style="font-size:0.62rem;word-break:break-all;color:#94a3b8;margin-bottom:3px">${escUrl(nr.url)}</div>`).join('') +
+                          `</div>`
+                        : (el.skipped ? '<span style="color:#64748b">skipped</span>' : '<span style="color:#64748b">0</span>');
                     html += `<tr>
                         <td>${j + 1}</td>
                         <td title="${el.element.selector}">${trackIcon} <span class="mono">${elLabel}</span></td>
                         <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${el.element.text || '--'}</td>
                         <td>${formatElementType(el.element.tag)}</td>
+                        <td style="text-align:center"><span class="badge" style="font-size:0.6rem">${zone}</span></td>
                         <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_1}</div></td>
                         <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_2}</div></td>
                         <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_3}</div></td>
                         <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${combinedAdobeOther}</div></td>
+                        <td style="white-space:normal;max-width:280px">${netCell}</td>
                     </tr>`;
                 });
                 html += '</tbody></table>';
@@ -1007,9 +1020,9 @@ function renderDcTable() {
                 html += '<div style="padding:16px;color:var(--muted)">No clickable elements found</div>';
             } else {
                 html += '<table style="width:100%;margin:0;font-size:0.75rem"><thead><tr>' +
-                    '<th style="width:30px">#</th><th>Element</th><th>Text</th><th>Type</th>' +
+                    '<th style="width:30px">#</th><th>Element</th><th>Text</th><th>Type</th><th>Zone</th>' +
                     '<th class="h-teal">GA4 Event 1</th><th class="h-teal">GA4 Event 2</th><th class="h-teal">GA4 Event 3</th>' +
-                    '<th class="h-adobe">Adobe / Other Calls</th></tr></thead><tbody>';
+                    '<th class="h-adobe">Adobe / Other Calls</th><th>Network</th></tr></thead><tbody>';
                 elems.forEach((el, j) => {
                     const ga4_1 = formatSingleGa4Event(el.ga4_events[0]);
                     const ga4_2 = formatSingleGa4Event(el.ga4_events[1]);
@@ -1055,16 +1068,29 @@ function renderDcTable() {
                     if (!combinedAdobeOther) combinedAdobeOther = '<span style="color:#64748b">--</span>';
 
                     const elLabel = el.element.id ? '#' + el.element.id : el.element.selector.substring(0, 40);
-                    const trackIcon = el.has_tracking ? '✅' : '⚠️';
+                    const trackIcon = el.skipped ? '⏭️' : (el.has_tracking ? '✅' : '⚠️');
+                    const zone = el.element.zone || 'body';
+                    const netReqs = el.network_requests || [];
+                    const netCount = el.network_count || netReqs.length;
+                    const netId = detailId + '-net-' + j;
+                    const escUrl = (u) => String(u).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                    const netCell = netCount
+                        ? `<span class="badge b-count" style="cursor:pointer" onclick="event.stopPropagation();document.getElementById('${netId}').classList.toggle('hidden')">${netCount} req ▾</span>` +
+                          `<div id="${netId}" class="hidden" style="max-height:220px;overflow:auto;margin-top:6px;text-align:left">` +
+                          netReqs.map(nr => `<div class="mono" style="font-size:0.62rem;word-break:break-all;color:#94a3b8;margin-bottom:3px">${escUrl(nr.url)}</div>`).join('') +
+                          `</div>`
+                        : (el.skipped ? '<span style="color:#64748b">skipped</span>' : '<span style="color:#64748b">0</span>');
                     html += `<tr>
                         <td>${j + 1}</td>
                         <td title="${el.element.selector}">${trackIcon} <span class="mono">${elLabel}</span></td>
                         <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${el.element.text || '--'}</td>
                         <td>${formatElementType(el.element.tag)}</td>
+                        <td style="text-align:center"><span class="badge" style="font-size:0.6rem">${zone}</span></td>
                         <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_1}</div></td>
                         <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_2}</div></td>
                         <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${ga4_3}</div></td>
                         <td style="white-space:normal;max-width:240px"><div class="event-cell-container">${combinedAdobeOther}</div></td>
+                        <td style="white-space:normal;max-width:280px">${netCell}</td>
                     </tr>`;
                 });
                 html += '</tbody></table>';

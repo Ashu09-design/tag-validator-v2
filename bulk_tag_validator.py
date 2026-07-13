@@ -1113,6 +1113,26 @@ DISCOVER_CLICKABLES_JS = r"""
         '[class*="click-track"]', '[class*="track-click"]', '[class*="emu-button"]', '[class*="emu-link"]'
     ];
 
+    // Deep element collection — walks the light DOM AND every open shadow
+    // root so web-component menus (common on enterprise sites) are scanned.
+    function collectAll(root, acc) {
+        try {
+            root.querySelectorAll('*').forEach(n => {
+                acc.push(n);
+                if (n.shadowRoot) collectAll(n.shadowRoot, acc);
+            });
+        } catch(e) {}
+        return acc;
+    }
+    const ALL_ELEMENTS = collectAll(document, []);
+    function queryDeep(sel) {
+        const out = [];
+        for (const el of ALL_ELEMENTS) {
+            try { if (el.matches && el.matches(sel)) out.push(el); } catch(e) {}
+        }
+        return out;
+    }
+
     // Class/id-based selectors that often match CONTAINER elements (div, li, span)
     // instead of the actual interactive child. We scan these separately and
     // resolve the real clickable inside them.
@@ -1187,11 +1207,21 @@ DISCOVER_CLICKABLES_JS = r"""
 
     const elementsToScan = new Set();
 
-    // 1. Gather directly interactive elements
+    // 1. Gather directly interactive elements (deep: pierces shadow DOM).
+    //    CRUCIAL: hidden-but-real links are kept too. Mega-menu / dropdown
+    //    links are display:none until their parent is hovered, so a
+    //    visible-only scan misses most of the nav tree (observed: 224 of
+    //    279 links hidden on an enterprise homepage). The click loop
+    //    re-expands menus before clicking, so these are fully testable.
     for (const sel of directSelectors) {
         try {
-            document.querySelectorAll(sel).forEach(el => {
+            queryDeep(sel).forEach(el => {
                 if (isVisible(el)) {
+                    elementsToScan.add(el);
+                } else if (
+                    (el.tagName === 'A' && el.getAttribute('href')) ||
+                    el.tagName === 'BUTTON'
+                ) {
                     elementsToScan.add(el);
                 }
             });
@@ -1202,7 +1232,7 @@ DISCOVER_CLICKABLES_JS = r"""
     //    interactive children to avoid reporting DIVs/SPANs/LIs as clickables.
     for (const sel of containerSelectors) {
         try {
-            document.querySelectorAll(sel).forEach(el => {
+            queryDeep(sel).forEach(el => {
                 if (!isVisible(el)) return;
                 if (isInteractive(el)) {
                     // The matched element itself is interactive
@@ -1233,7 +1263,7 @@ DISCOVER_CLICKABLES_JS = r"""
 
     // 3. Gather other elements with inline events or cursor: pointer style
     try {
-        document.querySelectorAll('*').forEach(el => {
+        ALL_ELEMENTS.forEach(el => {
             if (elementsToScan.has(el)) return;
             try {
                 if (el.onclick || el.onmousedown || el.getAttribute('onclick')) {
@@ -1307,10 +1337,12 @@ DISCOVER_CLICKABLES_JS = r"""
         try {
             if (shouldIgnoreElement(el)) return;
 
-            // Prefer visible innerText; fall back to value, placeholder,
-            // aria-label, title, alt — so icon-only buttons / image links
-            // still get a meaningful label instead of "[a]".
+            // Prefer visible innerText; fall back to textContent (innerText
+            // is EMPTY for display:none elements — hidden menu links need
+            // this), then value, placeholder, aria-label, title, alt — so
+            // icon-only buttons / image links still get a meaningful label.
             const text = (el.innerText
+                || (el.textContent || '').replace(/\s+/g, ' ').trim()
                 || el.value
                 || el.placeholder
                 || el.getAttribute('aria-label')
@@ -1319,27 +1351,49 @@ DISCOVER_CLICKABLES_JS = r"""
                 || (el.querySelector && (el.querySelector('img') || {}).alt)
                 || '').trim().substring(0, 80);
             const href = (el.href || el.getAttribute('href') || '').trim();
-            // Dedup by normalised text + href (case-insensitive, whitespace-
-            // collapsed). Same logical button across tag/id variants -> ONE
-            // entry. Empty-text icons keep DOM identity so they don't merge.
-            const textKey = text.toLowerCase().replace(/\s+/g, ' ');
-            const hrefKey = href.toLowerCase();
-            const key = textKey
-                ? 'T:' + textKey + '|H:' + hrefKey
-                : (el.tagName + '|H:' + hrefKey + '|I:' + (el.id || ''));
-            if (seen.has(key)) return;
-            seen.add(key);
 
             // Tag each element with its page zone so the audit can click
-            // header -> footer -> body in a clean order.
+            // header -> footer -> body in a clean order. Many enterprise
+            // sites (AEM/Experience Fragments etc.) don't use semantic
+            // <footer>/<header> tags at all — just divs with classes like
+            // "cmp-experiencefragment--footer". So walk ancestors checking
+            // id/class SUBSTRINGS, not a fixed tag/role selector list.
+            // Footer is checked first: footer link lists often sit inside
+            // a <nav>, so a header check done first would wrongly claim them.
             let zone = 'body';
             try {
-                if (el.closest('header, [role="banner"], .site-header, #header, .header, .navbar, nav, .top-nav')) {
-                    zone = 'header';
-                } else if (el.closest('footer, [role="contentinfo"], .site-footer, #footer, .footer, .bottom-nav')) {
-                    zone = 'footer';
+                let cur = el;
+                while (cur && cur !== document.body && cur !== document.documentElement) {
+                    const id = (cur.id || '').toLowerCase();
+                    const cls = (typeof cur.className === 'string' ? cur.className : '').toLowerCase();
+                    const role = (cur.getAttribute && cur.getAttribute('role') || '').toLowerCase();
+                    if (cur.tagName === 'FOOTER' || role === 'contentinfo' || id.includes('footer') || cls.includes('footer')) {
+                        zone = 'footer';
+                        break;
+                    }
+                    if (cur.tagName === 'HEADER' || cur.tagName === 'NAV' || role === 'banner'
+                        || id.includes('header') || cls.includes('header')
+                        || id.includes('navbar') || cls.includes('navbar')
+                        || cls.includes('top-nav') || cls.includes('main-nav')) {
+                        zone = 'header';
+                        break;
+                    }
+                    cur = cur.parentElement;
                 }
             } catch(e) {}
+
+            // Dedup by normalised text + href + ZONE (case-insensitive,
+            // whitespace-collapsed). Zone is part of the key so the same
+            // link in header AND footer is clicked in BOTH places — link
+            // position often changes the analytics payload, so QA needs
+            // each occurrence. Empty-text icons keep DOM identity.
+            const textKey = text.toLowerCase().replace(/\s+/g, ' ');
+            const hrefKey = href.toLowerCase();
+            const key = (textKey
+                ? 'T:' + textKey + '|H:' + hrefKey
+                : (el.tagName + '|H:' + hrefKey + '|I:' + (el.id || ''))) + '|Z:' + zone;
+            if (seen.has(key)) return;
+            seen.add(key);
 
             results.push({
                 selector: buildSelector(el),
@@ -1348,14 +1402,15 @@ DISCOVER_CLICKABLES_JS = r"""
                 href: href,
                 id: el.id || '',
                 zone: zone,
+                hidden: !isVisible(el),   // needs menu re-expansion before click
                 className: (typeof el.className === 'string') ? el.className.substring(0, 100) : '',
             });
         } catch(e) {}
     });
 
-    // QA-style: scan up to 1000 elements per page (effectively unlimited for
+    // QA-style: scan up to 2000 elements per page (effectively unlimited for
     // any normal site). Hard cap is just a safety net for runaway lists.
-    return results.slice(0, 1000);
+    return results.slice(0, 2000);
 })()
 """
 
@@ -1387,7 +1442,7 @@ EXPOSE_HIDDEN_JS = r"""
 
     let totalRevealed = 0;
     // Several rounds — opening one menu can reveal nested collapsibles.
-    for (let round = 0; round < 4; round++) {
+    for (let round = 0; round < 6; round++) {
         let actedThisRound = 0;
 
         // 1. Open native <details>
@@ -1409,9 +1464,9 @@ EXPOSE_HIDDEN_JS = r"""
             for (const el of els) {
                 if (!isVisible(el)) continue;
                 try { el.click(); actedThisRound++; } catch(e) {}
-                if (actedThisRound > 40) break;   // don't blow up huge pages in one round
+                if (actedThisRound > 150) break;   // don't blow up huge pages in one round
             }
-            if (actedThisRound > 40) break;
+            if (actedThisRound > 150) break;
         }
 
         // 3. Hover-style menus (top nav). Dispatch mouse events on every
@@ -1464,6 +1519,141 @@ BLOCK_NAVIGATION_JS = r"""
     document.addEventListener('submit', window.__navBlockerSubmitHandler, false);
 
     return true;
+})()
+"""
+
+
+# Instrument the page's tracking APIs so click-tracking is detected even when
+# the network beacon is deferred to the NEXT page view (Adobe ActivityMap),
+# batched by a TMS, or suppressed by consent state. Sites like Fresenius track
+# every link via ActivityMap — the click stores an s_sq cookie and the beacon
+# only rides on the next page load, so pure network capture reports
+# "no tracking" for links that ARE tracked. Wrapping the APIs catches the
+# call itself, at the moment of click:
+#   s.tl(...)                    -> Adobe custom link tracking
+#   utag.link(...)               -> Tealium click events
+#   gtag('event', ...)           -> GA4 API events
+#   dataLayer.push({event:...})  -> GTM/GA4 click triggers
+INSTRUMENT_TRACKING_JS = r"""
+(() => {
+    if (window.__qaTrackInstalled) return true;
+    window.__qaTrackInstalled = true;
+    window.__qaTrackCaptures = [];
+    const push = (type, detail) => {
+        try {
+            window.__qaTrackCaptures.push({type: type, detail: detail, ts: Date.now()});
+            if (window.__qaTrackCaptures.length > 500) window.__qaTrackCaptures.shift();
+        } catch(e) {}
+    };
+    const safeJson = (o) => {
+        try { return JSON.parse(JSON.stringify(o)); } catch(e) { return String(o); }
+    };
+
+    // Adobe AppMeasurement s.tl — re-check periodically, s is often defined
+    // late by the tag manager (Tealium/Launch).
+    const wrapS = () => {
+        try {
+            const s = window.s;
+            if (s && typeof s.tl === 'function' && !s.__qaWrapped) {
+                const orig = s.tl.bind(s);
+                s.__qaWrapped = true;
+                s.tl = function(obj, linkType, linkName, vars, doneAction) {
+                    push('s.tl', {link_type: String(linkType || ''), link_name: String(linkName || '')});
+                    return orig(obj, linkType, linkName, vars, doneAction);
+                };
+            }
+        } catch(e) {}
+    };
+    // Tealium utag.link
+    const wrapU = () => {
+        try {
+            const u = window.utag;
+            if (u && typeof u.link === 'function' && !u.__qaWrapped) {
+                const orig = u.link.bind(u);
+                u.__qaWrapped = true;
+                u.link = function(data, cb, uids) {
+                    push('utag.link', safeJson(data || {}));
+                    return orig(data, cb, uids);
+                };
+            }
+        } catch(e) {}
+    };
+    // GA4 gtag
+    const wrapG = () => {
+        try {
+            if (typeof window.gtag === 'function' && !window.gtag.__qaWrapped) {
+                const orig = window.gtag;
+                const wrapped = function() {
+                    try {
+                        if (arguments[0] === 'event') {
+                            push('gtag', {event: String(arguments[1] || ''), params: safeJson(arguments[2] || {})});
+                        }
+                    } catch(e) {}
+                    return orig.apply(this, arguments);
+                };
+                wrapped.__qaWrapped = true;
+                window.gtag = wrapped;
+            }
+        } catch(e) {}
+    };
+    // GTM dataLayer.push — only capture entries with an `event` key
+    const wrapDL = () => {
+        try {
+            const dl = window.dataLayer;
+            if (dl && typeof dl.push === 'function' && !dl.__qaWrapped) {
+                const orig = dl.push.bind(dl);
+                dl.__qaWrapped = true;
+                dl.push = function() {
+                    try {
+                        const a = arguments[0];
+                        if (a && typeof a === 'object' && !Array.isArray(a) && a.event) {
+                            push('dataLayer', safeJson(a));
+                        }
+                    } catch(e) {}
+                    return orig.apply(null, arguments);
+                };
+            }
+        } catch(e) {}
+    };
+
+    const wrapAll = () => { wrapS(); wrapU(); wrapG(); wrapDL(); };
+    wrapAll();
+    window.__qaTrackTimer = setInterval(wrapAll, 2000);
+    return true;
+})()
+"""
+
+HARVEST_TRACKING_JS = r"""
+(() => {
+    const c = window.__qaTrackCaptures || [];
+    window.__qaTrackCaptures = [];
+    return c;
+})()
+"""
+
+# Read AND clear Adobe ActivityMap's s_sq cookie. ActivityMap records the
+# clicked link into s_sq at click time and only transmits it with the NEXT
+# page view — since the audit blocks navigation, the cookie itself is the
+# proof that the click was tracked. Cleared after reading so each click
+# starts with a clean slate.
+READ_CLEAR_SSQ_JS = r"""
+(() => {
+    const m = document.cookie.match(/(?:^|;\s*)s_sq=([^;]*)/);
+    if (!m || !m[1]) return '';
+    let val = '';
+    try { val = decodeURIComponent(m[1]); } catch(e) { val = m[1]; }
+    const host = location.hostname;
+    const parts = host.split('.');
+    const domains = [host, '.' + host];
+    if (parts.length > 2) {
+        domains.push('.' + parts.slice(-2).join('.'));
+        domains.push('.' + parts.slice(-3).join('.'));
+    }
+    for (const d of domains) {
+        document.cookie = 's_sq=; path=/; domain=' + d + '; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+    }
+    document.cookie = 's_sq=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+    return val;
 })()
 """
 
@@ -1691,6 +1881,9 @@ async def validate_clicks(browser, url, index, total):
                     key = "T:" + t + "|H:" + h
                 else:
                     key = (el.get("tag", "") + "|H:" + h + "|I:" + (el.get("id") or ""))
+                # Zone + frame are part of identity: the same link in header
+                # AND footer (or inside an iframe) is a separate QA case.
+                key += "|Z:" + (el.get("zone") or "body") + "|F:" + (el.get("frame_url") or "")
                 if key not in elements_by_key:
                     elements_by_key[key] = el
 
@@ -1700,18 +1893,50 @@ async def validate_clicks(browser, url, index, total):
 
         # Pass B: hover each top-nav item ONE AT A TIME, brief settle, then
         # discover what's now visible — sub-menus revealed under that item.
+        # While that menu is open, DRILL DEEPER: hover any submenu items that
+        # look like parents themselves so nested flyouts (sub-sub-menus)
+        # render and get discovered too. Time-budgeted so a pathological
+        # mega-menu can't stall the whole audit.
         try:
             nav_locator = page.locator(
                 'header > * a, header > * button, header nav a, header nav button, '
                 'nav > a, nav > button, nav > ul > li, nav > ul > li > a, nav > ul > li > button, '
                 '[role="menuitem"], [class*="has-submenu"], [class*="has-children"]'
             )
-            nav_count = min(await nav_locator.count(), 30)
+            sub_parent_locator = page.locator(
+                '[aria-haspopup="true"], [class*="has-submenu"], [class*="has-children"], '
+                'li:has(> ul) > a, li:has(> div ul) > a, [class*="dropdown"] > a, '
+                '[class*="flyout"] > a, li[class*="parent"] > a'
+            )
+            nav_count = min(await nav_locator.count(), 80)
+            passb_deadline = time.time() + 150   # hard budget for pass B
             for ni in range(nav_count):
+                if time.time() > passb_deadline:
+                    break
                 try:
                     await nav_locator.nth(ni).hover(timeout=400, force=True, no_wait_after=True)
                     await asyncio.sleep(0.35)        # let sub-menu render
+                    before = len(elements_by_key)
                     _add_batch(await page.evaluate(DISCOVER_CLICKABLES_JS))
+                    # Only drill deeper when this hover actually revealed
+                    # something new — otherwise it's not a menu parent.
+                    if len(elements_by_key) > before:
+                        try:
+                            sub_count = min(await sub_parent_locator.count(), 20)
+                            for si in range(sub_count):
+                                if time.time() > passb_deadline:
+                                    break
+                                try:
+                                    s_el = sub_parent_locator.nth(si)
+                                    if not await s_el.is_visible(timeout=120):
+                                        continue
+                                    await s_el.hover(timeout=300, force=True, no_wait_after=True)
+                                    await asyncio.sleep(0.25)   # let flyout render
+                                    _add_batch(await page.evaluate(DISCOVER_CLICKABLES_JS))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             # Move mouse off so footer hover-menus get a chance too.
@@ -1764,7 +1989,7 @@ async def validate_clicks(browser, url, index, total):
         opened_count = 0
         for sel in opener_selectors:
             try:
-                count = min(await page.locator(sel).count(), 6)
+                count = min(await page.locator(sel).count(), 12)
             except Exception:
                 count = 0
             for i in range(count):
@@ -1787,12 +2012,12 @@ async def validate_clicks(browser, url, index, total):
                     # We track which sub-parents we've already clicked (by a
                     # cheap signature) so we don't toggle the same one shut.
                     clicked_subs = set()
-                    for _round in range(6):
+                    for _round in range(8):
                         before = len(elements_by_key)
                         round_clicked = 0
                         for ssel in sub_selectors:
                             try:
-                                sc = min(await page.locator(ssel).count(), 25)
+                                sc = min(await page.locator(ssel).count(), 40)
                             except Exception:
                                 sc = 0
                             for j in range(sc):
@@ -1842,21 +2067,47 @@ async def validate_clicks(browser, url, index, total):
         try: _add_batch(await page.evaluate(DISCOVER_CLICKABLES_JS))
         except Exception: pass
 
-        # REMOVE the navigation blocker before the click loop.
-        # We WANT clicks to navigate naturally so Adobe's deferred
-        # link tracking (s.tl via beforeunload) fires its beacon.
+        # Same-origin iframe discovery — video embeds, form widgets and CMP
+        # iframes contain clickables too. Cross-origin frames can't be read
+        # (browser security), those throw and are skipped harmlessly.
         try:
-            await page.evaluate("""(() => {
-                if (window.__navBlockerClickHandler) {
-                    document.removeEventListener('click', window.__navBlockerClickHandler, false);
-                    window.__navBlockerClickHandler = null;
-                }
-                if (window.__navBlockerSubmitHandler) {
-                    document.removeEventListener('submit', window.__navBlockerSubmitHandler, false);
-                    window.__navBlockerSubmitHandler = null;
-                }
-                window.__navBlockerInstalled = false;
-            })()""")
+            for fr in page.frames:
+                if fr == page.main_frame:
+                    continue
+                try:
+                    batch = await fr.evaluate(DISCOVER_CLICKABLES_JS)
+                    for b in batch:
+                        b["frame_url"] = fr.url
+                    if batch:
+                        sys.stdout.write(f"[{index}/{total}] Found {len(batch)} clickable(s) inside iframe {fr.url[:60]}\n")
+                        sys.stdout.flush()
+                    _add_batch(batch)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # KEEP navigation blocked during the click loop. preventDefault only
+        # stops the browser-default navigation — GA4 / GTM / Adobe click
+        # handlers still run in the same event tick (s.tl fires on the click
+        # itself, not on the navigation). Staying on the page keeps expanded
+        # menus intact, skips a full page reload per link (3-4x faster), and
+        # prevents the failure where one bad navigation kills every element
+        # after it (observed: 255/302 skipped after one nav-back failed).
+        # JS-driven redirects (window.location=...) can still escape the
+        # blocker — the per-element health check below recovers from those.
+        try:
+            await page.evaluate(BLOCK_NAVIGATION_JS)
+        except Exception:
+            pass
+
+        # Instrument tracking APIs (s.tl / utag.link / gtag / dataLayer) and
+        # clear any ActivityMap s_sq left over from the discovery clicks so
+        # the first audited element starts clean.
+        try:
+            await page.evaluate(INSTRUMENT_TRACKING_JS)
+            await page.evaluate(READ_CLEAR_SSQ_JS)
+            await page.evaluate(HARVEST_TRACKING_JS)
         except Exception:
             pass
 
@@ -1878,6 +2129,53 @@ async def validate_clicks(browser, url, index, total):
 
         original_url = page.url
 
+        async def _ensure_on_page():
+            """Recover the audit page if a click escaped the nav blocker.
+            Re-creates the page (with CDP + listeners) if it crashed/closed,
+            re-navigates with retries if the URL drifted. Returns True if a
+            reload happened (menus will be collapsed again)."""
+            nonlocal page, cdp
+            try:
+                if page.is_closed():
+                    page = await context.new_page()
+                    try: page.on("request", on_pw_request)
+                    except Exception: pass
+                    cdp = await context.new_cdp_session(page)
+                    await cdp.send("Network.enable")
+                    cdp.on("Network.requestWillBeSent", on_req_persistent)
+            except Exception:
+                pass
+            cur = ""
+            try:
+                cur = page.url
+            except Exception:
+                pass
+            if _norm_url(cur) == _norm_url(original_url):
+                return False
+            for attempt in range(3):
+                try:
+                    await page.goto(original_url, wait_until="domcontentloaded", timeout=25000)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=6000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1.0)
+                    break
+                except Exception:
+                    await asyncio.sleep(2.0 * (attempt + 1))
+            try:
+                await page.evaluate(BLOCK_NAVIGATION_JS)
+            except Exception:
+                pass
+            # A reload wipes the API wraps — re-instrument.
+            try:
+                await page.evaluate(INSTRUMENT_TRACKING_JS)
+                await page.evaluate(READ_CLEAR_SSQ_JS)
+                await page.evaluate(HARVEST_TRACKING_JS)
+            except Exception:
+                pass
+            return True
+
         # Request capture listeners were attached before navigation (see top of
         # this function). Clear out everything captured during page load /
         # discovery so the click loop starts from a clean slate — keeps the
@@ -1894,12 +2192,18 @@ async def validate_clicks(browser, url, index, total):
                     "text": elem.get("text", ""),
                     "href": elem.get("href", ""),
                     "id": elem.get("id", ""),
+                    "zone": elem.get("zone", "body"),
+                    "frame_url": elem.get("frame_url", ""),
                 },
                 "ga4_events": [],
                 "adobe_calls": [],
                 "adobe_websdk": [],
                 "other_analytics": [],
+                "network_requests": [],   # RAW capture: every request in this click's window
+                "network_count": 0,
                 "has_tracking": False,
+                "skipped": False,
+                "click_method": "",
                 "total_requests": 0
             })
 
@@ -1983,10 +2287,68 @@ async def validate_clicks(browser, url, index, total):
             clicked = False
             click_method = ""
             el = None
+
+            # HEALTH CHECK: if a previous click escaped the nav blocker
+            # (JS redirect / window.open), recover before touching locators —
+            # otherwise every remaining element fails on a dead page.
             try:
-                el = page.locator(elem["selector"]).first
+                await _ensure_on_page()
             except Exception:
                 pass
+
+            # Resolve the target frame — elements discovered inside a
+            # same-origin iframe must be located through that frame.
+            target = page
+            if elem.get("frame_url"):
+                try:
+                    for fr in page.frames:
+                        if fr.url == elem["frame_url"]:
+                            target = fr
+                            break
+                except Exception:
+                    pass
+
+            # PRIMARY: the discovery selector.
+            try:
+                cand = target.locator(elem["selector"]).first
+                if await cand.count() > 0:
+                    el = cand
+            except Exception:
+                pass
+            # FALLBACK 1: locate by href — selectors can go stale, but the
+            # href is stable. NOTE: el.href (what discovery stored) is the
+            # ABSOLUTE url while the DOM attribute is often RELATIVE, and
+            # CSS [href=...] matches the raw attribute — so try the absolute
+            # form, the path-only form, and an ends-with match.
+            if el is None and (elem.get("href") or "").startswith("http"):
+                try:
+                    from urllib.parse import urlparse as _hp
+                    full = elem["href"]
+                    path = _hp(full).path or ""
+                    cand_sels = [f'a[href="{full.replace(chr(34), "")}"]']
+                    if path and path != "/":
+                        cand_sels.append(f'a[href="{path}"]')
+                        cand_sels.append(f'a[href$="{path}"]')
+                    for cs in cand_sels:
+                        try:
+                            cand = target.locator(cs).first
+                            if await cand.count() > 0:
+                                el = cand
+                                break
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            # FALLBACK 2: locate by exact visible text.
+            if el is None:
+                txt = (elem.get("text") or "").strip()
+                if txt and not txt.startswith("["):
+                    try:
+                        cand = target.get_by_text(txt, exact=True).first
+                        if await cand.count() > 0:
+                            el = cand
+                    except Exception:
+                        pass
 
             # Bookmark: note how many requests exist BEFORE clicking
             req_bookmark = len(all_requests)
@@ -2000,6 +2362,13 @@ async def validate_clicks(browser, url, index, total):
                     is_visible = False
 
                 if not is_visible:
+                    # Re-open collapsed menus/accordions first (they re-collapse
+                    # after every navigate-back), then walk up the DOM tree.
+                    try:
+                        await page.evaluate(EXPOSE_HIDDEN_JS)
+                        await asyncio.sleep(0.4)
+                    except Exception:
+                        pass
                     # JS: walk up DOM tree, expand any collapsed parent menus
                     try:
                         await el.evaluate("""e => {
@@ -2110,6 +2479,7 @@ async def validate_clicks(browser, url, index, total):
 
             label = elem.get("text", "")[:30] or elem.get("selector", "")[:30]
             if not clicked:
+                el_res["skipped"] = True
                 sys.stdout.write(
                     f"[{index}/{total}]   [{ei+1}/{len(elements)}] [{elem.get('zone', 'body').upper()[:6]}] \"{label}\" -> [SKIPPED]\n")
                 sys.stdout.flush()
@@ -2117,7 +2487,71 @@ async def validate_clicks(browser, url, index, total):
 
             # Capture: grab all NEW requests since the bookmark
             click_requests = all_requests[req_bookmark:]
+            # RAW network log for this click — full QA visibility, nothing
+            # silently dropped. Capped per element as a safety net only.
+            el_res["network_requests"] = [
+                {"url": r["url"][:300]} for r in click_requests[:200]
+            ]
+            el_res["network_count"] = len(click_requests)
+            el_res["click_method"] = click_method
             _parse_click_requests(click_requests, el_res)
+
+            # Harvest API-LEVEL tracking fired by this click — catches Adobe
+            # s.tl, Tealium utag.link, gtag events and GTM dataLayer pushes
+            # even when their network beacon is deferred, batched or blocked.
+            try:
+                api_caps = await page.evaluate(HARVEST_TRACKING_JS)
+            except Exception:
+                api_caps = []
+            for cap in api_caps or []:
+                ctype = cap.get("type")
+                det = cap.get("detail") or {}
+                if ctype == "s.tl":
+                    el_res["adobe_calls"].append({
+                        "link_type": "s.tl:" + ((det.get("link_type") or "o") if isinstance(det, dict) else "o"),
+                        "link_name": (det.get("link_name") or "") if isinstance(det, dict) else "",
+                        "evars": {}, "props": {},
+                    })
+                    el_res["has_tracking"] = True
+                elif ctype == "utag.link":
+                    detail_str = json.dumps(det)[:180] if isinstance(det, (dict, list)) else str(det)[:180]
+                    el_res["other_analytics"].append({"vendor": "Tealium utag.link", "url": detail_str})
+                    el_res["has_tracking"] = True
+                elif ctype == "gtag":
+                    el_res["ga4_events"].append({
+                        "event": (det.get("event") or "") if isinstance(det, dict) else str(det),
+                        "measurement_id": "(gtag api)",
+                        "params": (det.get("params") or {}) if isinstance(det, dict) else {},
+                    })
+                    el_res["has_tracking"] = True
+                elif ctype == "dataLayer" and isinstance(det, dict):
+                    params = {k: v for k, v in det.items()
+                              if k != "event" and isinstance(v, (str, int, float, bool))}
+                    el_res["ga4_events"].append({
+                        "event": str(det.get("event") or ""),
+                        "measurement_id": "(dataLayer)",
+                        "params": params,
+                    })
+                    el_res["has_tracking"] = True
+
+            # ActivityMap: the click stores its link record in the s_sq
+            # cookie (sent with the NEXT page view, which we block) — the
+            # cookie itself is proof the click is Adobe-tracked.
+            try:
+                s_sq = await page.evaluate(READ_CLEAR_SSQ_JS)
+            except Exception:
+                s_sq = ""
+            if s_sq:
+                oid = ""
+                m_oid = re.search(r'oid%3D(.*?)%26', s_sq, re.I) or re.search(r'oid=([^&;]*)', s_sq, re.I)
+                if m_oid:
+                    oid = unquote(unquote(m_oid.group(1))).strip()[:120]
+                el_res["adobe_calls"].append({
+                    "link_type": "ActivityMap",
+                    "link_name": oid or s_sq[:120],
+                    "evars": {}, "props": {},
+                })
+                el_res["has_tracking"] = True
 
             # Log result for this element
             ga_str = ", ".join(e["event"] for e in el_res["ga4_events"]) or "--"
@@ -2135,23 +2569,23 @@ async def validate_clicks(browser, url, index, total):
                 f"[{index}/{total}]   [{ei+1}/{len(elements)}] [{zone_tag}] \"{label}\" -> [{click_method}] GA4:[{ga_str}] Adobe:[{aa_str}]{extra}\n")
             sys.stdout.flush()
 
-            # After click, page may have navigated. Go back to original page.
+            # Close any popup tabs the click opened (target=_blank links).
+            # Their requests were already captured by the context-level
+            # listener; leaving them open would pollute later clicks.
             try:
-                current = page.url
-                if current != original_url and not current.startswith("about:"):
-                    await page.goto(original_url, wait_until="domcontentloaded", timeout=20000)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=8000)
-                    except:
-                        pass
-                    await asyncio.sleep(1.5)
+                for extra_pg in context.pages:
+                    if extra_pg != page:
+                        try: await extra_pg.close()
+                        except Exception: pass
             except Exception:
-                # If we can't go back, try one more time
-                try:
-                    await page.goto(original_url, wait_until="domcontentloaded", timeout=20000)
-                    await asyncio.sleep(1.5)
-                except:
-                    pass
+                pass
+
+            # The nav blocker keeps most clicks on-page; if this one escaped
+            # (JS redirect), recover now with retries + page re-create.
+            try:
+                await _ensure_on_page()
+            except Exception:
+                pass
 
         # DEBUG: dump unique hosts seen across the whole click loop
         try:
@@ -2201,7 +2635,9 @@ async def validate_clicks(browser, url, index, total):
                 pass
 
     tracked = sum(1 for r in elements_result if r["has_tracking"])
-    sys.stdout.write(f"[{index}/{total}] Done: {url} | {tracked}/{len(elements_result)} elements have tracking\n")
+    skipped = sum(1 for r in elements_result if r.get("skipped"))
+    sys.stdout.write(f"[{index}/{total}] Done: {url} | {tracked}/{len(elements_result)} elements have tracking"
+                     f"{f' | {skipped} skipped' if skipped else ''}\n")
     sys.stdout.flush()
 
     return {
@@ -2209,6 +2645,7 @@ async def validate_clicks(browser, url, index, total):
         "Total_Elements": len(elements_result),
         "With_Tracking": tracked,
         "Without_Tracking": len(elements_result) - tracked,
+        "Skipped": skipped,
         "Error": "",
         "_click_rich": {
             "URL": url,
@@ -2674,7 +3111,7 @@ async def main():
         cols += ['Compliance', 'Error']
         res_df[[c for c in cols if c in res_df.columns]].to_excel(output_file, index=False)
     elif args.mode == 'clicks':
-        cols = ['URL', 'Total_Elements', 'With_Tracking', 'Without_Tracking', 'Error']
+        cols = ['URL', 'Total_Elements', 'With_Tracking', 'Without_Tracking', 'Skipped', 'Error']
         summary_df = res_df[[c for c in cols if c in res_df.columns]]
         
         detail_rows = []
@@ -2711,6 +3148,10 @@ async def main():
                         
                 other_evs = ", ".join([o.get("vendor", "") for o in el_res.get("other_analytics", [])]) or "--"
                 
+                # Raw request URLs for full QA visibility — capped so the
+                # cell stays inside Excel's 32k character limit.
+                net_urls = "\n".join(nr.get("url", "") for nr in el_res.get("network_requests", [])[:60])
+
                 detail_rows.append({
                     "Page URL": page_url,
                     "Element Tag": el.get("tag", ""),
@@ -2718,6 +3159,9 @@ async def main():
                     "Element ID": el.get("id", ""),
                     "Element Href": el.get("href", ""),
                     "Element Selector": el.get("selector", ""),
+                    "Zone": el.get("zone", ""),
+                    "Frame": el.get("frame_url", ""),
+                    "Click Status": "Skipped" if el_res.get("skipped") else (el_res.get("click_method") or "clicked"),
                     "Tracking Detected": "Yes" if el_res.get("has_tracking") else "No",
                     "GA4 Event 1 Name": ga4_1_name,
                     "GA4 Event 1 ID": ga4_1_id,
@@ -2731,7 +3175,9 @@ async def main():
                     "GA4 Extra Events": ga4_extra,
                     "Adobe Calls Fired": adobe_evs,
                     "Other Analytics Fired": other_evs,
-                    "Total Network Requests": el_res.get("total_requests", 0)
+                    "Analytics Requests": el_res.get("total_requests", 0),
+                    "All Network Requests": el_res.get("network_count", 0),
+                    "Network Request URLs": net_urls,
                 })
         detail_df = pd.DataFrame(detail_rows)
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
