@@ -6,7 +6,7 @@ const XLSX = require('xlsx');
 const { spawn } = require('child_process');
 const cors = require('cors');
 const cron = require('node-cron');
-const { v4: uuidv4 } = require('uuid');
+
 const registerAiRoutes = require('./ai_assistant');
 
 const app = express();
