@@ -3,7 +3,8 @@ title: Tag Validator Pro
 emoji: 🏷️
 colorFrom: indigo
 colorTo: purple
-sdk: docker
+sdk: gradio
+python_version: "3.10"
 app_port: 7860
 pinned: true
 ---

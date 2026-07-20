@@ -23,3 +23,8 @@ crawled_urls.xlsx
 sdr_results.json
 sdr_results.xlsx
 click_results.json
+
+# Runtime (downloaded on HF Space startup)
+node-v*/
+ms-playwright/
+node.tar.xz
