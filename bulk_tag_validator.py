@@ -4301,14 +4301,36 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         sys.stdout.flush()
 
         for ci, case in enumerate(page_cases):
+            label = (case.get("button_name") or case.get("link_text") or "")[:34]
+
+            # Not every SDR row describes a click. Page-load, history-change
+            # and page-view rows have no button to press, and consent-banner
+            # rows are deliberately out of scope for the audit. Calling those
+            # "Fail — element not found" would be wrong: nothing was tested.
+            _ct = (case.get("click_type") or "").lower()
+            _nm = (case.get("button_name") or "").lower()
+            _blob = _ct + " " + _nm
+            if any(k in _blob for k in ("page load", "page view", "pageview",
+                                        "history change", "scroll", "page_load",
+                                        "timer", "impression")):
+                _record(case, "SKIPPED",
+                        f"Not a click test — SDR marks this as '{case.get('click_type') or case.get('button_name')}'")
+                sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> NOT A CLICK (skipped)\n")
+                sys.stdout.flush()
+                continue
+            if any(k in _blob for k in ("cookie", "consent", "onetrust", "privacy choices")):
+                _record(case, "SKIPPED",
+                        "Consent/cookie UI is excluded from the audit by design")
+                sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> CONSENT UI (skipped)\n")
+                sys.stdout.flush()
+                continue
+
             # --- locate the element this SDR row is about ---
             best, best_score = None, 0
             for el in elements:
                 sc = _sdr_score_element(case, el, page_url)
                 if sc > best_score:
                     best, best_score = el, sc
-
-            label = (case.get("button_name") or case.get("link_text") or "")[:34]
             if best is None or best_score < 4:
                 _record(case, "FAIL",
                         f"Element not found on page (looked for name '{case.get('button_name')}'"
