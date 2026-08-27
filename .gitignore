@@ -20,6 +20,8 @@ package-lock.json
 # local internal + generated outputs
 .claude/
 crawled_urls.xlsx
+sdr_input.xlsx
+sdr_filled.xlsx
 sdr_results.json
 sdr_results.xlsx
 click_results.json
