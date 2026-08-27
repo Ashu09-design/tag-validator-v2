@@ -1110,7 +1110,100 @@
         <div class="tabs">
             <button class="tab-btn active" onclick="switchTab('manual')">Live Validation</button>
             <button class="tab-btn" onclick="switchTab('domain')">Domain Crawl</button>
+            <button class="tab-btn" onclick="switchTab('sdr')">SDR QA</button>
             <button class="tab-btn" onclick="switchTab('scheduler')">Automated Schedules</button>
+        </div>
+
+        <!-- SDR TAB — automate a manual Solution Design Reference QA pass -->
+        <div id="tab-sdr" class="tab-content">
+            <div class="table-card glass" style="padding:18px 20px;margin-bottom:20px">
+                <h3 style="font-size:0.95rem;margin-bottom:6px">📋 SDR Click-Level QA</h3>
+                <p style="font-size:0.78rem;color:var(--muted);margin-bottom:16px;line-height:1.55">
+                    Upload your SDR. Every row is opened, its button is clicked for real, and the
+                    GA4 event plus <b>all</b> expected parameters are compared against what actually
+                    fired. You get your own sheet back with the QA column filled in and the reason
+                    for each failure written beside it.
+                </p>
+
+                <!-- Step 1: file -->
+                <div style="margin-bottom:16px">
+                    <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:6px">
+                        <b style="color:var(--text)">1.</b> SDR workbook (.xlsx)
+                    </label>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+                        <input type="file" id="sdrFile" accept=".xlsx,.xlsm" class="sch-email" style="flex:1;min-width:240px">
+                        <button id="sdrUploadBtn" class="btn btn-primary">Upload &amp; Read Sheets</button>
+                    </div>
+                    <div id="sdrFileState" style="font-size:0.75rem;color:var(--muted);margin-top:6px"></div>
+                </div>
+
+                <!-- Step 2: sheet -->
+                <div style="margin-bottom:16px">
+                    <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:6px">
+                        <b style="color:var(--text)">2.</b> Which sheet holds the SDR?
+                    </label>
+                    <select id="sdrSheet" class="sch-email" style="width:100%;max-width:520px" disabled>
+                        <option>Upload a file first…</option>
+                    </select>
+                    <div id="sdrSheetInfo" style="font-size:0.72rem;color:var(--muted);margin-top:6px"></div>
+                </div>
+
+                <!-- Step 3: GA4 property (must be chosen explicitly) -->
+                <div style="margin-bottom:16px">
+                    <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:6px">
+                        <b style="color:var(--text)">3.</b> Which GA4 property should this be validated against?
+                    </label>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+                        <input type="text" id="sdrDetectUrl" class="sch-email" placeholder="Page to scan for GA4 IDs (defaults to first SDR URL)" style="flex:1;min-width:260px">
+                        <button id="sdrDetectBtn" class="btn">🔍 Detect GA4 IDs</button>
+                    </div>
+                    <select id="sdrGa4Id" class="sch-email" style="width:100%;max-width:520px;margin-top:10px" disabled>
+                        <option value="">Detect IDs, then choose one…</option>
+                    </select>
+                    <div id="sdrGa4Info" style="font-size:0.72rem;color:var(--muted);margin-top:6px">
+                        Sites often tag to more than one GA4 property. Pick the one this SDR is written for —
+                        an event that fires only on the other property will be reported as a failure.
+                    </div>
+                </div>
+
+                <!-- Step 4: QA column -->
+                <div style="margin-bottom:18px">
+                    <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:6px">
+                        <b style="color:var(--text)">4.</b> QA column to fill
+                    </label>
+                    <select id="sdrQaColumn" class="sch-email" style="width:100%;max-width:520px" disabled>
+                        <option value="">Auto (prefers Live/Prod)</option>
+                    </select>
+                </div>
+
+                <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+                    <button id="sdrRunBtn" class="btn btn-primary" disabled>Run SDR QA</button>
+                    <button id="sdrCancelBtn" class="btn btn-danger hidden">Cancel</button>
+                    <a id="sdrDownloadFilled" class="btn hidden" href="/api/sdr/download?type=filled">⬇ Filled SDR</a>
+                    <a id="sdrDownloadReport" class="btn hidden" href="/api/sdr/download?type=report">⬇ Flat Report</a>
+                </div>
+
+                <div id="sdrLog" class="hidden" style="margin-top:16px;background:var(--inset-bg);border-radius:8px;padding:12px;max-height:220px;overflow:auto;font-family:monospace;font-size:0.68rem;line-height:1.6;color:var(--muted)"></div>
+            </div>
+
+            <div id="sdrSummary" class="hidden" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:18px"></div>
+
+            <div id="sdrResultsCard" class="table-card glass hidden">
+                <div class="table-wrap">
+                    <table id="sdrTable">
+                        <thead><tr>
+                            <th style="width:44px">Row</th>
+                            <th>Page</th>
+                            <th>Link / Button</th>
+                            <th>Expected Event</th>
+                            <th>Actual Event</th>
+                            <th style="width:74px">Result</th>
+                            <th>Why it failed</th>
+                        </tr></thead>
+                        <tbody id="sdrBody"></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- MANUAL TAB -->

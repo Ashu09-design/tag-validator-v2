@@ -1428,3 +1428,300 @@ document.addEventListener('DOMContentLoaded', () => {
         input.style.height = Math.min(input.scrollHeight, 100) + 'px';
     });
 });
+
+// ===================== SDR QA =====================
+// Automates the manual SDR pass: upload the sheet, pick which GA4 property is
+// the source of truth, then every row is clicked for real and compared.
+
+let sdrSheets = [];
+let sdrPollTimer = null;
+
+function sdrEl(id) { return document.getElementById(id); }
+
+function sdrSetLog(lines) {
+    const box = sdrEl('sdrLog');
+    if (!box) return;
+    box.classList.remove('hidden');
+    box.innerHTML = (lines || []).map(l => escapeHtml(l)).join('<br>');
+    box.scrollTop = box.scrollHeight;
+}
+
+function sdrFillSheets(sheets) {
+    sdrSheets = sheets || [];
+    const sel = sdrEl('sdrSheet');
+    if (!sel) return;
+    // Only sheets that actually contain test cases are worth offering.
+    const usable = sdrSheets.filter(s => (s.testable_rows || 0) > 0);
+    if (!usable.length) {
+        sel.innerHTML = '<option value="">No sheet with testable rows found</option>';
+        sel.disabled = true;
+        return;
+    }
+    usable.sort((a, b) => (b.testable_rows || 0) - (a.testable_rows || 0));
+    sel.innerHTML = usable.map(s =>
+        '<option value="' + escapeHtml(s.name) + '">' + escapeHtml(s.name) +
+        ' — ' + s.testable_rows + ' rows, ' + (s.page_urls || []).length + ' pages</option>'
+    ).join('');
+    sel.disabled = false;
+    sdrOnSheetChange();
+}
+
+function sdrOnSheetChange() {
+    const sel = sdrEl('sdrSheet');
+    const info = sdrEl('sdrSheetInfo');
+    const qa = sdrEl('sdrQaColumn');
+    const meta = sdrSheets.find(s => s.name === sel.value);
+    if (!meta) return;
+    const urls = meta.page_urls || [];
+    const real = urls.filter(u => /^https?:/i.test(u));
+    if (info) {
+        let html = meta.testable_rows + ' testable rows across ' + real.length + ' real page URL(s)';
+        if (urls.length > real.length) {
+            html += ' <span style="color:#fbbf24">· ' + (urls.length - real.length) +
+                    ' placeholder URL(s) will be marked "Not Tested"</span>';
+        }
+        if (real.length) {
+            html += '<br><span style="opacity:.75">' +
+                    escapeHtml(real.slice(0, 3).join(' · ')) +
+                    (real.length > 3 ? ' …' : '') + '</span>';
+        }
+        info.innerHTML = html;
+    }
+    if (qa) {
+        const cols = meta.qa_columns || [];
+        qa.innerHTML = '<option value="">Auto (prefers Live/Prod)</option>' +
+            cols.map(c => '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>').join('');
+        qa.disabled = false;
+        const live = cols.find(c => /live|prod/i.test(c));
+        if (live) qa.value = live;
+    }
+    // Seed the detect box with this sheet's first real page.
+    const durl = sdrEl('sdrDetectUrl');
+    if (durl && !durl.value && real.length) durl.value = real[0];
+    sdrUpdateRunState();
+}
+
+function sdrUpdateRunState() {
+    const btn = sdrEl('sdrRunBtn');
+    if (!btn) return;
+    const sheetSel = sdrEl('sdrSheet');
+    const idSel = sdrEl('sdrGa4Id');
+    const sheetOk = sheetSel && !sheetSel.disabled && sheetSel.value;
+    const ga4Ok = idSel && idSel.value;
+    btn.disabled = !(sheetOk && ga4Ok);
+    btn.title = ga4Ok ? '' : 'Choose which GA4 property to validate against first';
+}
+
+async function sdrUpload() {
+    const f = sdrEl('sdrFile');
+    const state = sdrEl('sdrFileState');
+    if (!f || !f.files.length) { alert('Choose an SDR .xlsx file first'); return; }
+    const fd = new FormData();
+    fd.append('file', f.files[0]);
+    state.textContent = 'Uploading and reading sheets…';
+    try {
+        const r = await fetch('/api/sdr/upload', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (!r.ok || d.error) { state.textContent = 'Upload failed: ' + (d.error || r.status); return; }
+        state.innerHTML = '✅ <b>' + escapeHtml(d.originalName || 'SDR') + '</b> uploaded — ' +
+                          (d.sheets || []).length + ' sheet(s) found';
+        sdrFillSheets(d.sheets);
+    } catch (e) {
+        state.textContent = 'Upload failed: ' + e.message;
+    }
+}
+
+async function sdrDetectGa4() {
+    const btn = sdrEl('sdrDetectBtn');
+    const info = sdrEl('sdrGa4Info');
+    const sel = sdrEl('sdrGa4Id');
+    let url = (sdrEl('sdrDetectUrl').value || '').trim();
+    if (!url) {
+        const meta = sdrSheets.find(s => s.name === sdrEl('sdrSheet').value);
+        const real = ((meta && meta.page_urls) || []).filter(u => /^https?:/i.test(u));
+        url = real[0] || '';
+    }
+    if (!url) { alert('Enter a page URL to scan for GA4 IDs'); return; }
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = 'Scanning…';
+    info.textContent = 'Loading ' + url + ' and watching which GA4 properties receive hits…';
+    try {
+        const r = await fetch('/api/sdr/detect-ga4', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url })
+        });
+        const d = await r.json();
+        const ids = d.ids || [];
+        if (!ids.length) {
+            sel.innerHTML = '<option value="">No GA4 property detected</option>';
+            sel.disabled = true;
+            info.innerHTML = '<span style="color:#fbbf24">No GA4 hits seen on that page.</span> ' +
+                (d.error ? escapeHtml(String(d.error).slice(0, 120))
+                         : 'Check the URL, or consent may be blocking tags.');
+        } else {
+            sel.innerHTML = '<option value="">— choose a property —</option>' +
+                ids.map(i => '<option value="' + escapeHtml(i) + '">' + escapeHtml(i) + '</option>').join('');
+            sel.disabled = false;
+            info.innerHTML = 'Found <b>' + ids.length + '</b> GA4 propert' +
+                (ids.length === 1 ? 'y' : 'ies') + ': ' +
+                ids.map(i => '<code>' + escapeHtml(i) + '</code>').join(', ') +
+                (d.gtm && d.gtm.length ? ' · GTM ' + d.gtm.map(g => escapeHtml(g)).join(', ') : '') +
+                '<br>Pick the one this SDR was written for.';
+            if (ids.length === 1) sel.value = ids[0];
+        }
+    } catch (e) {
+        info.textContent = 'Detection failed: ' + e.message;
+    }
+    btn.disabled = false;
+    btn.textContent = oldText;
+    sdrUpdateRunState();
+}
+
+async function sdrRun() {
+    const sheet = sdrEl('sdrSheet').value;
+    const ga4Id = sdrEl('sdrGa4Id').value;
+    const qaColumn = sdrEl('sdrQaColumn').value;
+    const startUrl = (sdrEl('sdrDetectUrl').value || '').trim();
+    if (!ga4Id) { alert('Choose which GA4 measurement ID to validate against'); return; }
+
+    sdrEl('sdrRunBtn').disabled = true;
+    sdrEl('sdrCancelBtn').classList.remove('hidden');
+    sdrEl('sdrDownloadFilled').classList.add('hidden');
+    sdrEl('sdrDownloadReport').classList.add('hidden');
+    sdrSetLog(['Starting SDR QA…']);
+
+    try {
+        const r = await fetch('/api/sdr/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sheet: sheet, ga4Id: ga4Id, qaColumn: qaColumn, startUrl: startUrl })
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) {
+            sdrSetLog(['Could not start: ' + (d.error || r.status)]);
+            sdrEl('sdrRunBtn').disabled = false;
+            sdrEl('sdrCancelBtn').classList.add('hidden');
+            return;
+        }
+    } catch (e) {
+        sdrSetLog(['Could not start: ' + e.message]);
+        sdrEl('sdrRunBtn').disabled = false;
+        return;
+    }
+    if (sdrPollTimer) clearInterval(sdrPollTimer);
+    sdrPollTimer = setInterval(sdrPoll, 1500);
+}
+
+async function sdrPoll() {
+    try {
+        const d = await (await fetch('/api/tag-validator/status')).json();
+        sdrSetLog(d.logs || []);
+        if (!d.running) {
+            clearInterval(sdrPollTimer);
+            sdrPollTimer = null;
+            sdrEl('sdrCancelBtn').classList.add('hidden');
+            sdrUpdateRunState();
+            await sdrLoadResults();
+        }
+    } catch (e) { /* keep polling */ }
+}
+
+async function sdrLoadResults() {
+    let d;
+    try {
+        d = await (await fetch('/api/sdr/results')).json();
+    } catch (e) { return; }
+    const rows = d.results || [];
+    if (!rows.length) return;
+
+    sdrEl('sdrDownloadFilled').classList.remove('hidden');
+    sdrEl('sdrDownloadReport').classList.remove('hidden');
+
+    const pass = rows.filter(r => r.status === 'PASS').length;
+    const fail = rows.filter(r => r.status === 'FAIL').length;
+    const skip = rows.filter(r => r.status === 'SKIPPED').length;
+    const tile = (label, val, color) =>
+        '<div class="table-card glass" style="padding:12px 18px;min-width:120px">' +
+        '<div style="font-size:0.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">' + label + '</div>' +
+        '<div style="font-size:1.5rem;font-weight:700;color:' + color + '">' + val + '</div></div>';
+    const sum = sdrEl('sdrSummary');
+    sum.classList.remove('hidden');
+    sum.innerHTML = tile('Pass', pass, '#4ade80') + tile('Fail', fail, '#f87171') +
+        tile('Not tested', skip, '#fbbf24') + tile('Total', rows.length, 'var(--text)') +
+        (d.ga4_id ? tile('GA4 property',
+            '<span style="font-size:0.85rem;font-family:monospace">' + escapeHtml(d.ga4_id) + '</span>',
+            'var(--accent)') : '');
+
+    // A convention mismatch fails every row, which looks like hundreds of
+    // separate bugs. Show the root causes above the table so the reader knows
+    // how many actual fixes are involved.
+    const pats = d.failure_patterns || [];
+    if (pats.length) {
+        sum.innerHTML += '<div class="table-card glass" style="padding:12px 18px;flex:1;min-width:280px">' +
+            '<div style="font-size:0.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Failure patterns</div>' +
+            pats.slice(0, 5).map(p =>
+                '<div style="font-size:0.74rem;margin-bottom:4px">' +
+                '<span class="mono" style="color:#fca5a5">' + escapeHtml(p.param) + '</span>' +
+                ' <span style="color:var(--muted)">' + p.failed_rows + ' row(s)</span>' +
+                (p.note ? '<br><span style="font-size:0.68rem;color:var(--muted);opacity:.85">' +
+                          escapeHtml(p.note) + '</span>' : '') +
+                '</div>').join('') +
+            '</div>';
+    }
+
+    const badge = (s) => {
+        const map = {
+            PASS: ['#4ade80', 'rgba(74,222,128,.12)', 'Pass'],
+            FAIL: ['#f87171', 'rgba(248,113,113,.12)', 'Fail'],
+            SKIPPED: ['#fbbf24', 'rgba(251,191,36,.12)', 'Not tested']
+        };
+        const m = map[s] || ['#94a3b8', 'rgba(148,163,184,.12)', s];
+        return '<span class="badge" style="color:' + m[0] + ';background:' + m[1] +
+               ';border:1px solid ' + m[0] + '55">' + m[2] + '</span>';
+    };
+
+    sdrEl('sdrResultsCard').classList.remove('hidden');
+    sdrEl('sdrBody').innerHTML = rows.map(r => {
+        const shortPage = String(r.page_url || '').replace(/^https?:\/\/(www\.)?/, '');
+        const reasonColor = r.status === 'FAIL' ? '#fca5a5' : 'var(--muted)';
+        return '<tr>' +
+            '<td>' + r.excel_row + '</td>' +
+            '<td class="url-col" title="' + escapeHtml(r.page_url || '') +
+                '" style="max-width:170px;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(shortPage) + '</td>' +
+            '<td style="max-width:180px">' + escapeHtml(r.button_name || '') + '</td>' +
+            '<td><span class="mono" style="color:#38bdf8">' + escapeHtml(r.expected_event || '') + '</span></td>' +
+            '<td><span class="mono" style="color:' + (r.actual_event ? '#4ade80' : '#64748b') + '">' +
+                escapeHtml(r.actual_event || '--') + '</span></td>' +
+            '<td style="text-align:center">' + badge(r.status) + '</td>' +
+            '<td style="white-space:normal;max-width:340px;font-size:0.72rem;color:' + reasonColor + '">' +
+                escapeHtml(r.reason || '') + '</td>' +
+            '</tr>';
+    }).join('');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const up = document.getElementById('sdrUploadBtn');
+    if (up) up.addEventListener('click', sdrUpload);
+    const det = document.getElementById('sdrDetectBtn');
+    if (det) det.addEventListener('click', sdrDetectGa4);
+    const run = document.getElementById('sdrRunBtn');
+    if (run) run.addEventListener('click', sdrRun);
+    const sheetSel = document.getElementById('sdrSheet');
+    if (sheetSel) sheetSel.addEventListener('change', sdrOnSheetChange);
+    const idSel = document.getElementById('sdrGa4Id');
+    if (idSel) idSel.addEventListener('change', sdrUpdateRunState);
+    const cancel = document.getElementById('sdrCancelBtn');
+    if (cancel) cancel.addEventListener('click', async () => {
+        await fetch('/api/tag-validator/cancel', { method: 'POST' });
+    });
+    // Pick up an SDR that was uploaded in an earlier session.
+    fetch('/api/sdr/sheets').then(r => r.json()).then(d => {
+        if (d.sheets && d.sheets.length) {
+            sdrFillSheets(d.sheets);
+            const st = document.getElementById('sdrFileState');
+            if (st) st.innerHTML = 'Using the previously uploaded SDR — ' + d.sheets.length + ' sheet(s).';
+        }
+    }).catch(() => {});
+});

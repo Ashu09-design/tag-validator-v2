@@ -1977,6 +1977,14 @@ CLICK_BEACON_MAX_WAIT = 8.0
 # still land before reconciliation runs.
 FINAL_DRAIN_WAIT = 9.0
 
+# SDR validation judges each row on its own capture window — there is no
+# later reconciliation pass to rescue a hit that arrived too late. It also has
+# to see EVERY property a dual-tagged site sends to, or it would report an
+# event as missing from a property that simply answered a few seconds later.
+# So it waits longer, and never closes the window before the minimum.
+SDR_MIN_BEACON_WAIT = 7.5
+SDR_BEACON_MAX_WAIT = 14.0
+
 # Read AND clear Adobe ActivityMap's s_sq cookie. ActivityMap records the
 # clicked link into s_sq at click time and only transmits it with the NEXT
 # page view — since the audit blocks navigation, the cookie itself is the
@@ -3686,86 +3694,231 @@ async def validate_clicks(browser, url, index, total):
 # and compares against the SDR's expected event name + parameters. Output
 # is PASS/FAIL per row with a parameter-level diff.
 
-def parse_sdr_file(sdr_path):
-    """Parse an SDR Excel into a list of test cases.
+SDR_SKIP_VALUES = {'', '-', '--', 'n/a', 'na', 'nan', 'none', 'tbd', 'x'}
+SDR_GLOBAL_URLS = {'all pages', 'global', 'all page', 'sitewide', 'site wide'}
 
-    The user's SDR template has row 0 as human labels like "Site Type (site_type)".
-    The lowercase token inside parentheses is the actual GA4 event parameter name,
-    and the column's value (from row 1 onwards) is the expected value for that
-    parameter on that test case.
+
+def _sdr_clean(v):
+    """Normalise one SDR cell. The template uses '-' for 'not applicable'."""
+    if v is None:
+        return ''
+    try:
+        if pd.isna(v):
+            return ''
+    except Exception:
+        pass
+    s = str(v).replace('\u00a0', ' ').strip()
+    return '' if s.lower() in SDR_SKIP_VALUES else s
+
+
+def _sdr_find_header_row(ws, max_scan=8):
+    """Locate the real header row.
+
+    These workbooks put a grouping banner on row 1 ("Event Name",
+    "Parameter 1"...) and the actual column names on row 2. Rather than
+    hard-coding row 2, find the row that carries the anchor columns — some
+    sheets do use row 1.
     """
-    df = pd.read_excel(sdr_path)
-    if len(df) < 2:
-        return []
+    return _sdr_header_row_from_grid(_sdr_grid(ws, max_scan), max_scan)
 
-    label_row = df.iloc[0]
-    col_to_param = {}
-    col_to_label = {}
-    for col in df.columns:
-        v = str(label_row.get(col, '') or '').strip()
-        col_to_label[col] = v
-        m = re.search(r'\(([a-z_][a-z0-9_]*)\)\s*$', v.lower())
-        if m:
-            col_to_param[col] = m.group(1).strip()
 
-    def col_with(needle):
-        for col, lbl in col_to_label.items():
-            if needle in lbl.lower():
-                return col
+def _sdr_grid(ws, limit=None):
+    """Read a worksheet into plain row tuples.
+
+    openpyxl's `ws.cell(r, c)` is a linear scan on a read-only worksheet, so
+    addressing every cell of a 1000x30 sheet that way takes minutes. Streaming
+    the rows once is effectively instant.
+    """
+    rows = []
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
+        rows.append(row)
+        if limit and i + 1 >= limit:
+            break
+    return rows
+
+
+def _sdr_cellv(grid, r, c):
+    """1-based cell lookup into a grid produced by _sdr_grid."""
+    if r < 1 or r > len(grid):
         return None
+    row = grid[r - 1]
+    return row[c - 1] if 0 < c <= len(row) else None
 
-    url_col       = col_with("page url")
-    loc_col       = col_with("location")
-    event_col     = col_with("ga4 event name")
-    link_text_col = col_with("link text")
-    link_url_col  = col_with("link url")
+
+def _sdr_header_row_from_grid(grid, max_scan=8):
+    best, best_score = 1, -1
+    for r in range(1, min(max_scan, len(grid)) + 1):
+        vals = [str(v or '').strip().lower() for v in grid[r - 1]]
+        joined = ' | '.join(vals)
+        score = 0
+        for needle in ('page url', 'location', 'click type', 'link/button name',
+                       'ga4 event', 'event type'):
+            if needle in joined:
+                score += 1
+        if score > best_score:
+            best, best_score = r, score
+    return best if best_score >= 2 else 1
+
+
+def list_sdr_sheets(sdr_path):
+    """Describe every sheet so the UI can offer a picker.
+
+    Returns each sheet's name, how many rows look testable and the distinct
+    page URLs — enough for someone to recognise which tab is the live SDR.
+    """
+    import openpyxl
+    out = []
+    try:
+        wb = openpyxl.load_workbook(sdr_path, data_only=True, read_only=True)
+    except Exception as e:
+        return [{"name": "", "error": str(e)[:120], "testable_rows": 0, "page_urls": []}]
+    for ws in wb.worksheets:
+        try:
+            grid = _sdr_grid(ws)
+            hr = _sdr_header_row_from_grid(grid)
+            hdr = [str(v or '').strip() for v in (grid[hr - 1] if hr <= len(grid) else ())]
+            low = [h.lower() for h in hdr]
+
+            def idx(*needles):
+                for i, h in enumerate(low):
+                    if any(n in h for n in needles):
+                        return i + 1
+                return 0
+
+            c_url = idx('page url') or 1
+            c_name = idx('link/button name', 'link/button', 'button name') or 4
+            c_ev = idx('ga4 event', 'event name') or 5
+            rows, urls, last = 0, [], ''
+            for r in range(hr + 1, len(grid) + 1):
+                u = _sdr_clean(_sdr_cellv(grid, r, c_url))
+                if u:
+                    last = u
+                nm = _sdr_clean(_sdr_cellv(grid, r, c_name))
+                ev = _sdr_clean(_sdr_cellv(grid, r, c_ev))
+                if nm and ev:
+                    rows += 1
+                    if last and last not in urls:
+                        urls.append(last)
+            out.append({
+                "name": ws.title,
+                "header_row": hr,
+                "testable_rows": rows,
+                "page_urls": urls[:40],
+                "qa_columns": [h for h in hdr if 'qa' in h.lower()],
+            })
+        except Exception as e:
+            out.append({"name": ws.title, "error": str(e)[:120],
+                        "testable_rows": 0, "page_urls": []})
+    try:
+        wb.close()
+    except Exception:
+        pass
+    return out
+
+
+def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
+    """Parse one SDR sheet into test cases.
+
+    Layout these workbooks share: a banner row, then the real header row, then
+    data. `Page URL` is filled only on the first row of each block and blank
+    afterwards meaning "same page as above", so it is forward-filled. A column
+    named like "Link Text (link_text)" declares that the value underneath is
+    the expected GA4 parameter `link_text` — that is what makes automated
+    comparison possible at all.
+
+    Each case keeps `excel_row` so results can be written straight back into
+    the operator's own sheet, in the format they already use.
+    """
+    import openpyxl
+    wb = openpyxl.load_workbook(sdr_path, data_only=True)
+    if sheet_name and sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+    else:
+        sheets = list_sdr_sheets(sdr_path)
+        pick = max(sheets, key=lambda s: s.get("testable_rows", 0)) if sheets else None
+        ws = wb[pick["name"]] if pick and pick.get("name") in wb.sheetnames else wb.worksheets[0]
+
+    grid = _sdr_grid(ws)
+    hr = _sdr_header_row_from_grid(grid)
+    headers = [str(v or '').strip() for v in (grid[hr - 1] if hr <= len(grid) else ())]
+    low = [h.lower() for h in headers]
+
+    def col_of(*needles):
+        for i, h in enumerate(low):
+            if any(n in h for n in needles):
+                return i + 1
+        return 0
+
+    c_url = col_of('page url') or 1
+    c_loc = col_of('location')
+    c_type = col_of('click type', 'event type')
+    c_name = col_of('link/button name', 'link/button', 'button name')
+    c_event = col_of('ga4 event name', 'ga4 event', 'event name')
+
+    # Columns that declare a GA4 parameter, e.g. "Link URL (link_url)".
+    param_cols = {}
+    for i, h in enumerate(headers):
+        m = re.search(r'\(([a-z_][a-z0-9_ ]*)\)\s*$', h.strip().lower())
+        if m:
+            pname = m.group(1).strip().replace(' ', '_')
+            if pname and (i + 1) not in (c_url, c_loc, c_type, c_name, c_event):
+                param_cols[i + 1] = pname
+
+    qa_cols = {}
+    for i, h in enumerate(headers):
+        if 'qa' in h.lower():
+            qa_cols[h] = i + 1
 
     cases = []
     last_url = ''
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        url_v = row.get(url_col) if url_col else None
-        if pd.isna(url_v) or str(url_v).strip() == '':
-            page_url = last_url
-        else:
-            page_url = str(url_v).strip()
-            last_url = page_url
+    for r in range(hr + 1, len(grid) + 1):
+        raw_url = _sdr_clean(_sdr_cellv(grid, r, c_url))
+        if raw_url:
+            last_url = raw_url
+        page_url = last_url
 
-        def cell(col):
-            if not col:
-                return ''
-            v = row.get(col)
-            if pd.isna(v):
-                return ''
-            s = str(v).strip()
-            return '' if s in ('-', 'nan', 'None') else s
-
-        link_text = cell(link_text_col)
-        link_url  = cell(link_url_col)
-        if not link_text and not link_url:
-            continue
-        expected_event = cell(event_col)
-        if not expected_event:
-            continue
+        name = _sdr_clean(_sdr_cellv(grid, r, c_name)) if c_name else ''
+        expected_event = _sdr_clean(_sdr_cellv(grid, r, c_event)) if c_event else ''
+        if not name or not expected_event:
+            continue   # spacer / section heading / not a test case
 
         expected_params = {}
-        for col, pname in col_to_param.items():
-            if pname in ('link_text', 'link_url'):
-                continue
-            sv = cell(col)
-            if sv:
-                expected_params[pname] = sv
+        for col, pname in param_cols.items():
+            v = _sdr_clean(_sdr_cellv(grid, r, col))
+            if v:
+                expected_params[pname] = v
 
+        # "All Pages" / "Global" rows still need a concrete page to test on.
+        eff = page_url
+        if (not eff) or eff.lower() in SDR_GLOBAL_URLS:
+            eff = base_url or ''
         cases.append({
-            "row_index": int(i),
-            "page_url": page_url,
-            "location": cell(loc_col).lower(),
-            "link_text": link_text,
-            "link_url": link_url,
+            "excel_row": r,
+            "sheet": ws.title,
+            "page_url_raw": page_url,
+            "page_url": eff,
+            "applies_all_pages": bool(page_url and page_url.lower() in SDR_GLOBAL_URLS),
+            "location": _sdr_clean(_sdr_cellv(grid, r, c_loc)).lower() if c_loc else '',
+            "click_type": _sdr_clean(_sdr_cellv(grid, r, c_type)) if c_type else '',
+            "button_name": name,
+            "link_text": expected_params.get('link_text', '') or name,
+            "link_url": expected_params.get('link_url', ''),
             "expected_event": expected_event,
             "expected_params": expected_params,
         })
-    return cases
+
+    try:
+        wb.close()
+    except Exception:
+        pass
+    return {
+        "sheet": ws.title,
+        "header_row": hr,
+        "headers": headers,
+        "qa_columns": qa_cols,
+        "param_columns": param_cols,
+        "cases": cases,
+    }
 
 
 def _norm_str(s):
@@ -3824,189 +3977,728 @@ async def _find_sdr_target(page, link_text, link_url):
     return None
 
 
-async def validate_sdr(browser, sdr_path, start_url):
-    """Run the full SDR audit. Returns one result record per SDR test case."""
-    cases = parse_sdr_file(sdr_path)
-    sys.stdout.write(f"[SDR] Parsed {len(cases)} test cases from SDR\n")
+def _sdr_param_matches(pname, expected, actual, base_url=""):
+    """Compare one expected SDR parameter against what actually fired.
+
+    URL-ish parameters are compared on their normalised forms so that a
+    relative value in the SDR ("/search") still matches the absolute URL the
+    beacon reports. Everything else is a case- and whitespace-insensitive
+    comparison, because SDR authors type values by hand.
+    """
+    if actual is None:
+        return False
+    exp, act = str(expected), str(actual)
+    if pname in ('link_url', 'download_file_name', 'file_location', 'page_location'):
+        ek, ak = _url_keys(exp, base_url), _url_keys(act, base_url)
+        if ek and ak and (ek & ak):
+            return True
+        # download_file_name is often a bare name in one place and a path in
+        # the other ("botox-cosmetic_pi" vs "/pdf/botox-cosmetic_pi.pdf").
+        e_tail = _norm_str(exp).rstrip('/').split('/')[-1]
+        a_tail = _norm_str(act).rstrip('/').split('/')[-1]
+        if e_tail and a_tail:
+            if e_tail == a_tail:
+                return True
+            e_stem = re.sub(r'\.[a-z0-9]{1,5}$', '', e_tail)
+            a_stem = re.sub(r'\.[a-z0-9]{1,5}$', '', a_tail)
+            if e_stem and e_stem == a_stem:
+                return True
+    return _norm_str(exp) == _norm_str(act)
+
+
+def _sdr_actual_value(params, pname):
+    """Read a parameter out of a captured hit.
+
+    GA4 carries user-scoped values as `up.*`, which the parser stores under a
+    "[user] " prefix. An SDR simply names the parameter, so look in both
+    places — otherwise a value that IS being sent reads as missing.
+    """
+    if not isinstance(params, dict):
+        return None
+    if pname in params:
+        return params[pname]
+    alt = "[user] " + pname
+    if alt in params:
+        return params[alt]
+    low = {str(k).lower(): v for k, v in params.items()}
+    return low.get(pname.lower(), low.get(alt.lower()))
+
+
+def _sdr_score_element(case, el, base_url=""):
+    """How well does a discovered element answer this SDR row? Higher is better.
+
+    The SDR identifies a target the way a human would — by the button's name,
+    its link URL and roughly where it sits on the page. Scoring all three
+    beats taking the first text match, which is how the wrong element used to
+    get clicked when a link appears in both the header and the footer.
+    """
+    score = 0
+    el_text = _norm_str(el.get('text'))
+    el_href = el.get('href') or ''
+    zone = (el.get('zone') or 'body').lower()
+
+    want_url = case.get('link_url') or ''
+    if want_url:
+        # Resolve against the page being tested: SDRs write relative values
+        # ("/", "/search") while discovery stores the browser-resolved
+        # absolute href. A bare "/" is the site root — a real identifier for
+        # the logo, and the most common SDR row of all.
+        if _url_keys(want_url, base_url) & _url_keys(el_href, base_url):
+            score += 10
+
+    for want in (case.get('link_text') or '', case.get('button_name') or ''):
+        w = _norm_str(want)
+        if not w:
+            continue
+        if w == el_text:
+            score += 8
+        elif len(w) > 3 and (w in el_text or el_text in w):
+            score += 4
+
+    loc = (case.get('location') or '').lower()
+    if loc:
+        if 'header' in loc or 'menu' in loc or 'nav' in loc:
+            score += 3 if zone == 'header' else -1
+        elif 'footer' in loc:
+            score += 3 if zone == 'footer' else -1
+        elif 'body' in loc or 'hero' in loc or 'content' in loc:
+            score += 2 if zone == 'body' else 0
+
+    ctype = (case.get('click_type') or '').lower()
+    if 'download' in ctype and el.get('is_download'):
+        score += 3
+    return score
+
+
+async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
+                       ga4_id="", ga4_mode="specific"):
+    """Automate a manual SDR QA pass.
+
+    For every SDR row: open the page it names, find the button it names, click
+    it for real, and compare the GA4 event and every expected parameter
+    against what actually fired. A row passes only when the event name AND all
+    of its parameters match; otherwise it fails with an explicit reason naming
+    each parameter that differed, so the sheet says *why*, not just "Fail".
+
+    ga4_id / ga4_mode select which GA4 property counts as the source of truth
+    on sites that tag to more than one.
+    """
+    parsed = parse_sdr_file(sdr_path, sheet_name, base_url=start_url)
+    cases = parsed["cases"]
+    sys.stdout.write(f"[SDR] Sheet '{parsed['sheet']}' -> {len(cases)} test cases\n")
+    if ga4_id:
+        sys.stdout.write(f"[SDR] Validating against GA4 property {ga4_id} (mode={ga4_mode})\n")
+    else:
+        sys.stdout.write("[SDR] No GA4 property selected — accepting a hit on any property\n")
     sys.stdout.flush()
     if not cases:
-        return []
+        return {"meta": parsed, "results": []}
 
-    # Group cases by effective page URL (Global / blank -> start_url).
-    by_page = {}
-    page_order = []
+    # Group by page so each URL is loaded once.
+    by_page, page_order = {}, []
     for c in cases:
-        key = (c["page_url"] or '').strip()
-        if not key or key.lower() == 'global':
-            key = start_url
+        key = (c.get("page_url") or "").strip()
         if key not in by_page:
             page_order.append(key)
             by_page[key] = []
         by_page[key].append(c)
 
+    results = []
+
+    def _record(case, status, reason, extra=None):
+        row = {
+            "excel_row": case["excel_row"],
+            "page_url": case.get("page_url", ""),
+            "location": case.get("location", ""),
+            "button_name": case.get("button_name", ""),
+            "link_text": case.get("link_text", ""),
+            "link_url": case.get("link_url", ""),
+            "expected_event": case.get("expected_event", ""),
+            "expected_params": case.get("expected_params", {}),
+            "status": status,
+            "reason": reason,
+            "actual_event": "",
+            "actual_params": {},
+            "fired_events": [],
+            "param_diff": [],
+            "matched_element": "",
+            "click_method": "",
+            "click_verified": False,
+        }
+        if extra:
+            row.update(extra)
+        results.append(row)
+        return row
+
     context = await browser.new_context(
         viewport={'width': 1280, 'height': 800},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     )
+
+    all_requests = []
+    seen_req_keys = set()
+    current_cid = {"v": -1}
+
+    def _push_req(u, post, ts):
+        if not u:
+            return
+        k = (u, round(ts, 2))
+        if k in seen_req_keys:
+            return
+        seen_req_keys.add(k)
+        all_requests.append({"url": u, "post": post or "", "ts": ts, "cid": current_cid["v"]})
+
+    def on_pw_request(request):
+        try:
+            pd_ = ""
+            try:
+                pd_ = request.post_data or ""
+            except Exception:
+                pass
+            _push_req(request.url, pd_, time.time())
+        except Exception:
+            pass
+
+    try:
+        context.on("request", on_pw_request)
+    except Exception:
+        pass
+
     page = await context.new_page()
     await stealth_obj.apply_stealth_async(page)
     cdp = await context.new_cdp_session(page)
     await cdp.send("Network.enable")
 
-    results = []
+    def on_cdp_req(params):
+        try:
+            req = params.get("request", {}) or {}
+            _push_req(req.get("url", ""), req.get("postData", "") or "", time.time())
+        except Exception:
+            pass
+    cdp.on("Network.requestWillBeSent", on_cdp_req)
+
+    detected_ids = set()
+
     for page_url in page_order:
         page_cases = by_page[page_url]
+
+        # SDR rows sometimes name a placeholder instead of a real page
+        # ("<providers name page>"). Those cannot be opened, and calling them
+        # failures would be misleading.
+        if not page_url or not page_url.lower().startswith("http"):
+            for c in page_cases:
+                _record(c, "SKIPPED",
+                        f"No testable page URL in SDR (value: '{c.get('page_url_raw') or 'blank'}')")
+            sys.stdout.write(f"[SDR] === SKIP '{page_url or '(blank)'}' "
+                             f"({len(page_cases)} cases, not a real URL) ===\n")
+            sys.stdout.flush()
+            continue
+
         sys.stdout.write(f"[SDR] === {page_url} ({len(page_cases)} cases) ===\n")
         sys.stdout.flush()
 
         try:
-            await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            pass
+            await page.goto(page_url, wait_until="domcontentloaded", timeout=45000)
+        except Exception as e:
+            for c in page_cases:
+                _record(c, "FAIL", f"Page did not load: {str(e)[:90]}")
+            continue
+
         await asyncio.sleep(2)
         await accept_cookies(page)
-        try: await page.wait_for_load_state("networkidle", timeout=10000)
-        except: pass
-        await asyncio.sleep(2)
-
-        # Block nav, expose menus, hover top nav for CSS-only dropdowns
-        try: await page.evaluate(BLOCK_NAVIGATION_JS)
-        except: pass
-        try: await page.evaluate(EXPOSE_HIDDEN_JS)
-        except: pass
-        await asyncio.sleep(0.6)
         try:
-            nav_loc = page.locator('header a, nav > a, nav > ul > li > a')
-            nc = min(await nav_loc.count(), 15)
-            for ni in range(nc):
-                try:
-                    await nav_loc.nth(ni).hover(timeout=350, force=True, no_wait_after=True)
-                    await asyncio.sleep(0.12)
-                except: pass
-        except: pass
-        try: await page.evaluate(EXPOSE_HIDDEN_JS)
-        except: pass
-        try: await page.evaluate(BLOCK_NAVIGATION_JS)
-        except: pass
-        await asyncio.sleep(0.5)
+            await page.wait_for_load_state("networkidle", timeout=12000)
+        except Exception:
+            pass
+        await asyncio.sleep(2.5)
 
-        for case in page_cases:
-            captured = []
-            def on_req(params):
+        # Same preparation the click audit uses: keep clicks on-page, open
+        # every menu so hidden targets exist, wrap the tracking APIs, and get
+        # any consent dialog out of the way before measuring.
+        try:
+            await page.evaluate(BLOCK_NAVIGATION_JS)
+        except Exception:
+            pass
+        try:
+            await page.evaluate(EXPOSE_HIDDEN_JS)
+            await asyncio.sleep(0.6)
+        except Exception:
+            pass
+
+        discovered = {}
+
+        def _absorb(batch):
+            for b in batch or []:
+                if b.get("uid"):
+                    discovered[b["uid"]] = b
+
+        try:
+            _absorb(await page.evaluate(DISCOVER_CLICKABLES_JS))
+        except Exception:
+            pass
+
+        # Hover each top-level nav item so CSS-only dropdowns render, and
+        # click obvious menu openers — SDR rows routinely target sub-menu
+        # links that do not exist in the DOM until their parent opens.
+        try:
+            nav = page.locator('header a, header button, nav > a, nav > button, '
+                               'nav > ul > li > a, nav > ul > li > button, [aria-haspopup]')
+            for i in range(min(await nav.count(), 40)):
                 try:
-                    req = params.get("request", {}) or {}
-                    u = req.get("url", "")
-                    if not u:
-                        return
-                    ul = u.lower()
-                    if "/g/collect" in ul or (
-                        ("google-analytics.com" in ul or "analytics.google.com" in ul)
-                        and "collect" in ul):
-                        captured.append({"url": u, "post": req.get("postData", "") or ""})
+                    await nav.nth(i).hover(timeout=350, force=True, no_wait_after=True)
+                    await asyncio.sleep(0.2)
+                    _absorb(await page.evaluate(DISCOVER_CLICKABLES_JS))
                 except Exception:
                     pass
-            cdp.on("Network.requestWillBeSent", on_req)
+        except Exception:
+            pass
+        for sel in ('button[aria-label*="menu" i]', 'button[class*="hamburger" i]',
+                    'button[class*="menu-toggle" i]', '[aria-haspopup="true"]',
+                    'button[aria-expanded="false"]'):
+            try:
+                loc = page.locator(sel)
+                for i in range(min(await loc.count(), 6)):
+                    el_o = loc.nth(i)
+                    if not await el_o.is_visible(timeout=250):
+                        continue
+                    if await el_o.evaluate("""e => {
+                        let n = e;
+                        while (n && n !== document.body) {
+                            const id = (n.id || '').toLowerCase();
+                            const cls = (typeof n.className === 'string' ? n.className : '').toLowerCase();
+                            if (/cookie|consent|onetrust|optanon|privacy/.test(id + ' ' + cls)) return true;
+                            n = n.parentElement;
+                        }
+                        return false;
+                    }"""):
+                        continue
+                    await el_o.click(force=True, timeout=800, no_wait_after=True)
+                    await asyncio.sleep(0.45)
+                    _absorb(await page.evaluate(DISCOVER_CLICKABLES_JS))
+            except Exception:
+                pass
+        try:
+            await page.evaluate(EXPOSE_HIDDEN_JS)
+            await asyncio.sleep(0.4)
+            _absorb(await page.evaluate(DISCOVER_CLICKABLES_JS))
+        except Exception:
+            pass
 
-            target = await _find_sdr_target(page, case["link_text"], case["link_url"])
-            element_found = target is not None
-            clicked = False
-            click_err = ""
-            if element_found:
-                try: await target.scroll_into_view_if_needed(timeout=1500)
-                except: pass
-                await asyncio.sleep(0.15)
-                for method in ("force", "dispatch", "js"):
-                    try:
-                        if method == "force":
-                            await target.click(force=True, timeout=2500, no_wait_after=True)
-                        elif method == "dispatch":
-                            await target.dispatch_event("click", timeout=2000)
-                        else:
-                            await target.evaluate("e => e.click()")
-                        clicked = True
-                        break
-                    except Exception as ce:
-                        click_err = str(ce)[:80]
+        try:
+            await page.evaluate(CLOSE_CONSENT_UI_JS)
+        except Exception:
+            pass
+        try:
+            await page.evaluate(BLOCK_NAVIGATION_JS)
+            await page.evaluate(INSTRUMENT_TRACKING_JS)
+            await page.evaluate(HARVEST_TRACKING_JS)
+        except Exception:
+            pass
 
+        elements = list(discovered.values())
+        sys.stdout.write(f"[SDR]   {len(elements)} clickable elements available for matching\n")
+        sys.stdout.flush()
+
+        for ci, case in enumerate(page_cases):
+            # --- locate the element this SDR row is about ---
+            best, best_score = None, 0
+            for el in elements:
+                sc = _sdr_score_element(case, el, page_url)
+                if sc > best_score:
+                    best, best_score = el, sc
+
+            label = (case.get("button_name") or case.get("link_text") or "")[:34]
+            if best is None or best_score < 4:
+                _record(case, "FAIL",
+                        f"Element not found on page (looked for name '{case.get('button_name')}'"
+                        f"{', url ' + case['link_url'] if case.get('link_url') else ''})")
+                sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> NOT FOUND\n")
+                sys.stdout.flush()
+                continue
+
+            loc_el = None
+            try:
+                cand = page.locator(f'[data-tvuid="{best["uid"]}"]')
+                if await cand.count() > 0:
+                    loc_el = cand.first
+            except Exception:
+                pass
+            if loc_el is None:
+                _record(case, "FAIL", "Element was discovered but no longer present when clicked")
+                continue
+
+            # --- make it visible / reachable ---
+            try:
+                if not await loc_el.is_visible(timeout=400):
+                    await page.evaluate(EXPOSE_HIDDEN_JS)
+                    await asyncio.sleep(0.35)
+            except Exception:
+                pass
+            try:
+                await loc_el.scroll_into_view_if_needed(timeout=1500)
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+
+            # --- drain, then open this case's capture window ---
+            try:
+                await page.evaluate(HARVEST_TRACKING_JS)
+                await page.evaluate(READ_CLEAR_WITNESS_JS)
+            except Exception:
+                pass
+            await asyncio.sleep(0.15)
+            bookmark = len(all_requests)
+            current_cid["v"] = ci
+
+            hit = None
+            try:
+                hit = await loc_el.evaluate("""(e) => {
+                    const r = e.getBoundingClientRect();
+                    if (!r.width || !r.height) return {ok: false};
+                    const c = [[r.x + r.width/2, r.y + r.height/2],
+                               [r.x + r.width*0.25, r.y + r.height/2],
+                               [r.x + r.width*0.75, r.y + r.height/2]];
+                    for (const [x, y] of c) {
+                        if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
+                        const t = document.elementFromPoint(x, y);
+                        if (t && (t === e || e.contains(t) || t.contains(e))) return {ok: true, x, y};
+                    }
+                    return {ok: false};
+                }""")
+            except Exception:
+                pass
+            pierced = False
+            if not (hit and hit.get("ok")):
+                try:
+                    await page.evaluate(CLOSE_CONSENT_UI_JS)
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.2)
+                    hit = await loc_el.evaluate(PIERCE_OVERLAY_JS)
+                    pierced = True
+                except Exception:
+                    pass
+
+            clicked, click_method = False, ""
+            if hit and hit.get("ok"):
+                try:
+                    for t in ("mouseMoved", "mousePressed", "mouseReleased"):
+                        args = {"type": t, "x": hit["x"], "y": hit["y"]}
+                        if t != "mouseMoved":
+                            args.update({"button": "left", "clickCount": 1})
+                        await cdp.send("Input.dispatchMouseEvent", args)
+                        if t == "mousePressed":
+                            await asyncio.sleep(0.05)
+                    clicked, click_method = True, "cdp-click"
+                except Exception:
+                    pass
+            if not clicked:
+                try:
+                    await loc_el.evaluate("e => e.click()")
+                    clicked, click_method = True, "js-click"
+                except Exception:
+                    pass
+            if pierced:
+                try:
+                    await page.evaluate(RESTORE_OVERLAY_JS)
+                except Exception:
+                    pass
+
+            verified = False
             if clicked:
-                await asyncio.sleep(2.5)
+                await asyncio.sleep(0.25)
+                try:
+                    w = await page.evaluate(READ_CLEAR_WITNESS_JS)
+                    verified = best["uid"] in ((w or {}).get("uids") or [])
+                except Exception:
+                    pass
 
-            cdp.remove_listener("Network.requestWillBeSent", on_req)
+            if not clicked:
+                current_cid["v"] = -1
+                _record(case, "FAIL", "Element found but could not be clicked",
+                        {"matched_element": best.get("text", "")[:60]})
+                sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> CLICK FAILED\n")
+                sys.stdout.flush()
+                continue
 
-            # Parse captured GA4 hits — pick first matching expected event name.
-            matched = None
-            all_events = []
-            for req in captured:
-                ga4_list = parse_ga4_event(req["url"], req["post"])
-                for ev in ga4_list:
-                    all_events.append(ev)
-                    if ev["event"] == case["expected_event"] and matched is None:
-                        matched = ev
+            # --- wait for the beacon, then close the window ---
+            await asyncio.sleep(0.6)
+            try:
+                early = await page.evaluate(PEEK_TRACKING_JS)
+            except Exception:
+                early = []
+            expect = bool(early)
+            # A site that tags to two GA4 properties does not always send both
+            # hits together — one can arrive seconds after the other. A pure
+            # "quiet for 1.2s" rule closes the window in the gap between them
+            # and then reports the event as missing from the property that had
+            # not answered yet. So when an event is expected, hold the window
+            # open for a minimum period regardless of quiet, and only let the
+            # quiet detector extend past that.
+            started = time.time()
+            min_wait = SDR_MIN_BEACON_WAIT if expect else 0.8
+            deadline = started + (SDR_BEACON_MAX_WAIT if expect else CLICK_IDLE_WAIT)
+            last_n, last_change = len(all_requests), time.time()
+            quiet = 1.5 if expect else 0.6
+            while time.time() < deadline:
+                await asyncio.sleep(0.25)
+                if len(all_requests) != last_n:
+                    last_n, last_change = len(all_requests), time.time()
+                    continue
+                if time.time() - started < min_wait:
+                    continue
+                if time.time() - last_change >= quiet:
+                    break
+            current_cid["v"] = -1
 
-            event_pass = matched is not None
-            param_results = []
-            params_passed = 0
-            params_failed = 0
-            if matched:
-                for p_name, p_expected in case["expected_params"].items():
-                    actual = matched["params"].get(p_name, "")
-                    is_match = _norm_str(actual) == _norm_str(p_expected)
-                    if is_match:
-                        params_passed += 1
-                    else:
-                        params_failed += 1
-                    param_results.append({
-                        "param": p_name,
-                        "expected": p_expected,
-                        "actual": actual,
-                        "match": is_match,
-                    })
+            window_reqs = all_requests[bookmark:]
+            try:
+                api_caps = await page.evaluate(HARVEST_TRACKING_JS)
+            except Exception:
+                api_caps = []
 
-            if not element_found:
-                overall = "FAIL"
-                fail_reason = "Element not found on page"
-            elif not clicked:
-                overall = "FAIL"
-                fail_reason = f"Click failed: {click_err}"
-            elif not event_pass:
-                overall = "FAIL"
-                fail_reason = f"Expected event '{case['expected_event']}' not fired"
-            elif params_failed > 0:
-                overall = "FAIL"
-                fail_reason = f"{params_failed} parameter(s) mismatched"
+            # --- collect what actually fired ---
+            net_events = []
+            for req in window_reqs:
+                ul = req["url"].lower()
+                if "/g/collect" in ul or (("google-analytics.com" in ul
+                                           or "analytics.google.com" in ul) and "collect" in ul):
+                    for ev in parse_ga4_event(req["url"], req["post"]):
+                        if ev.get("event") and not _is_noise_event(ev["event"]):
+                            net_events.append(ev)
+                            if ev.get("measurement_id"):
+                                detected_ids.add(ev["measurement_id"])
+
+            api_events = []
+            for cap in api_caps or []:
+                det = cap.get("detail") or {}
+                if cap.get("type") in ("dataLayer", "adobeDataLayer", "gtag") and isinstance(det, dict):
+                    nm = str(det.get("event") or det.get("xdm:eventType") or "")
+                    if nm and not _is_noise_event(nm):
+                        api_events.append({
+                            "event": nm,
+                            "measurement_id": "(dataLayer)",
+                            "params": {k: v for k, v in det.items()
+                                       if k != "event" and isinstance(v, (str, int, float, bool))},
+                        })
+
+            # Only hits on the selected GA4 property count as evidence.
+            if ga4_id and ga4_mode != "any":
+                scoped = [e for e in net_events if e.get("measurement_id") == ga4_id]
             else:
-                overall = "PASS"
-                fail_reason = ""
+                scoped = list(net_events)
 
-            results.append({
-                "row_index": case["row_index"],
-                "page_url": page_url,
-                "location": case["location"],
-                "link_text": case["link_text"],
-                "link_url": case["link_url"],
-                "expected_event": case["expected_event"],
-                "actual_events": [e["event"] for e in all_events],
-                "element_found": element_found,
-                "clicked": clicked,
-                "click_error": click_err,
-                "event_match": event_pass,
-                "params_passed": params_passed,
-                "params_failed": params_failed,
-                "param_results": param_results,
-                "overall": overall,
-                "fail_reason": fail_reason,
+            expected_event = case["expected_event"]
+            cands = [e for e in scoped if _norm_str(e.get("event")) == _norm_str(expected_event)]
+
+            reasons, param_diff = [], []
+            matched = None
+            if cands:
+                # Several hits can carry the same event name; judge against the
+                # one that satisfies the most of this row's expectations.
+                def fit(ev):
+                    return sum(1 for p, v in case["expected_params"].items()
+                               if _sdr_param_matches(
+                                   p, v, _sdr_actual_value(ev.get("params") or {}, p), page_url))
+                matched = max(cands, key=fit)
+
+            if matched is None:
+                fired = sorted({e.get("event", "") for e in scoped})
+                api_named = sorted({e["event"] for e in api_events
+                                    if _norm_str(e["event"]) == _norm_str(expected_event)})
+                other_prop = sorted({e.get("measurement_id", "") for e in net_events
+                                     if _norm_str(e.get("event")) == _norm_str(expected_event)})
+                if api_named and not other_prop:
+                    reasons.append(
+                        f"'{expected_event}' was pushed to the dataLayer but no GA4 hit was sent"
+                        + (f" on {ga4_id}" if ga4_id else ""))
+                elif other_prop:
+                    reasons.append(
+                        f"'{expected_event}' fired only on {', '.join(other_prop)}"
+                        f" — not on the selected property {ga4_id}")
+                else:
+                    reasons.append(
+                        f"Expected event '{expected_event}' did not fire"
+                        + (f". Events seen: {', '.join(fired)}" if fired else " (no GA4 event fired)"))
+            else:
+                actual_params = matched.get("params") or {}
+                for pname, pexp in case["expected_params"].items():
+                    pact = _sdr_actual_value(actual_params, pname)
+                    ok = _sdr_param_matches(pname, pexp, pact, page_url)
+                    param_diff.append({"param": pname, "expected": pexp,
+                                       "actual": "" if pact is None else str(pact), "match": ok})
+                    if not ok:
+                        if pact is None or str(pact) == "":
+                            # Distinguish "this event omitted it" from "the site
+                            # never sends it at all" — very different fixes.
+                            anywhere = any(
+                                _sdr_actual_value(e.get("params") or {}, pname) not in (None, "")
+                                for e in net_events)
+                            if anywhere:
+                                reasons.append(
+                                    f"{pname}: expected '{pexp}' but not sent on this event "
+                                    f"(it is present on other hits)")
+                            else:
+                                reasons.append(
+                                    f"{pname}: expected '{pexp}' but never sent by the site")
+                        else:
+                            reasons.append(f"{pname}: expected '{pexp}' but got '{pact}'")
+
+            status = "PASS" if not reasons else "FAIL"
+            if status == "PASS" and not verified:
+                # Everything matched, but we could not prove the click landed on
+                # this exact element — say so rather than quietly passing it.
+                status = "PASS"
+                reasons.append("(note) click could not be verified on this exact element")
+
+            _record(case, status, "; ".join(reasons), {
+                "actual_event": (matched or {}).get("event", ""),
+                "actual_params": (matched or {}).get("params", {}),
+                "fired_events": sorted({e.get("event", "") for e in scoped}),
+                "param_diff": param_diff,
+                "matched_element": best.get("text", "")[:60],
+                "measurement_id": (matched or {}).get("measurement_id", ""),
+                "click_method": click_method,
+                "click_verified": verified,
             })
-            short_label = (case["link_text"] or case["link_url"] or "?")[:38]
-            sys.stdout.write(
-                f"[SDR] row{case['row_index']:>3} \"{short_label}\" -> "
-                f"event={'OK' if event_pass else 'MISS'} "
-                f"params {params_passed}P/{params_failed}F  [{overall}]\n"
-            )
+            mark = "PASS" if status == "PASS" else "FAIL"
+            sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> {mark}"
+                             f"{'' if status == 'PASS' else ' | ' + '; '.join(reasons)[:110]}\n")
             sys.stdout.flush()
 
-    await page.close()
-    await context.close()
-    return results
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            try:
+                for extra_pg in context.pages:
+                    if extra_pg != page:
+                        await extra_pg.close()
+            except Exception:
+                pass
+            # A click may have escaped the blocker via a JS redirect.
+            try:
+                if _norm_url(page.url) != _norm_url(page_url):
+                    await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(1.5)
+                    await page.evaluate(BLOCK_NAVIGATION_JS)
+                    await page.evaluate(INSTRUMENT_TRACKING_JS)
+                    await page.evaluate(EXPOSE_HIDDEN_JS)
+                    await asyncio.sleep(0.5)
+                    discovered = {}
+                    _absorb(await page.evaluate(DISCOVER_CLICKABLES_JS))
+                    elements = list(discovered.values())
+            except Exception:
+                pass
+
+    try:
+        await context.close()
+    except Exception:
+        pass
+
+    p = sum(1 for r in results if r["status"] == "PASS")
+    f = sum(1 for r in results if r["status"] == "FAIL")
+    s = sum(1 for r in results if r["status"] == "SKIPPED")
+    sys.stdout.write(f"[SDR] DONE — {p} PASS, {f} FAIL, {s} SKIPPED (of {len(results)})\n")
+    if detected_ids:
+        sys.stdout.write(f"[SDR] GA4 properties seen on site: {', '.join(sorted(detected_ids))}\n")
+    sys.stdout.flush()
+    return {"meta": parsed, "results": results,
+            "detected_ga4_ids": sorted(detected_ids), "ga4_id": ga4_id}
+
+
+def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
+    """Write the verdicts back into a copy of the operator's own SDR.
+
+    The whole point of the SDR is that it is *their* sheet — same tabs, same
+    rows, same order. So rather than handing back a foreign report, this fills
+    the QA column they already use with Pass / Fail and adds a reason column
+    immediately beside it saying exactly why a row failed (which parameter,
+    expected vs actual). Failed rows are tinted red and passes green so the
+    sheet can be skimmed the way a manual QA pass would be.
+    """
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.load_workbook(sdr_path)
+    sheet = meta.get("sheet") or wb.sheetnames[0]
+    if sheet not in wb.sheetnames:
+        raise ValueError(f"sheet '{sheet}' not in workbook")
+    ws = wb[sheet]
+    header_row = meta.get("header_row", 2)
+    qa_cols = meta.get("qa_columns", {}) or {}
+
+    # Prefer the requested QA column, else a Live/Prod one, else any QA column.
+    target_col = None
+    if qa_column and qa_column in qa_cols:
+        target_col = qa_cols[qa_column]
+    if target_col is None:
+        for name, col in qa_cols.items():
+            n = name.lower()
+            if 'live' in n or 'prod' in n:
+                target_col = col
+                break
+    if target_col is None and qa_cols:
+        target_col = list(qa_cols.values())[0]
+    if target_col is None:
+        target_col = ws.max_column + 1
+        ws.cell(header_row, target_col).value = "Live/Prod QA"
+
+    # Reason column goes immediately to the right of the QA verdict, inserting
+    # a fresh column so nothing already in the sheet is overwritten.
+    reason_col = target_col + 1
+    existing = str(ws.cell(header_row, reason_col).value or '').strip().lower()
+    if existing != 'qa fail reason':
+        ws.insert_cols(reason_col)
+        ws.cell(header_row, reason_col).value = "QA Fail Reason"
+    detail_col = reason_col + 1
+    existing2 = str(ws.cell(header_row, detail_col).value or '').strip().lower()
+    if existing2 != 'actual event fired':
+        ws.insert_cols(detail_col)
+        ws.cell(header_row, detail_col).value = "Actual Event Fired"
+
+    for c in (target_col, reason_col, detail_col):
+        ws.cell(header_row, c).font = Font(bold=True)
+    ws.column_dimensions[get_column_letter(reason_col)].width = 60
+    ws.column_dimensions[get_column_letter(detail_col)].width = 24
+
+    fill_pass = PatternFill("solid", fgColor="C6EFCE")
+    fill_fail = PatternFill("solid", fgColor="FFC7CE")
+    fill_skip = PatternFill("solid", fgColor="FFEB9C")
+    font_pass = Font(color="006100", bold=True)
+    font_fail = Font(color="9C0006", bold=True)
+    font_skip = Font(color="9C6500", bold=True)
+
+    for r in results:
+        row = r.get("excel_row")
+        if not row:
+            continue
+        status = r.get("status", "")
+        verdict = {"PASS": "Pass", "FAIL": "Fail", "SKIPPED": "Not Tested"}.get(status, status)
+        cell = ws.cell(row, target_col)
+        cell.value = verdict
+        if status == "PASS":
+            cell.fill, cell.font = fill_pass, font_pass
+        elif status == "FAIL":
+            cell.fill, cell.font = fill_fail, font_fail
+        else:
+            cell.fill, cell.font = fill_skip, font_skip
+
+        reason = r.get("reason", "") or ""
+        rc = ws.cell(row, reason_col)
+        rc.value = reason if status != "PASS" else (reason or "")
+        rc.alignment = openpyxl.styles.Alignment(wrap_text=True, vertical="top")
+        if status == "FAIL":
+            rc.fill = fill_fail
+
+        actual = r.get("actual_event", "") or ""
+        mid = r.get("measurement_id", "") or ""
+        ws.cell(row, detail_col).value = (f"{actual} [{mid}]" if actual and mid
+                                          else actual or "-")
+
+    wb.save(out_path)
+    return out_path
 
 
 async def run_batch(browser, urls_batch, start_index, total, mode=None):
@@ -4027,7 +4719,25 @@ async def main():
     parser.add_argument("--sdr", help="Path to SDR Excel file (for --mode sdr)")
     parser.add_argument("--start-url", dest="start_url",
                         help="Start URL for SDR audit (defaults to first http URL found in SDR)")
+    parser.add_argument("--sdr-sheet", dest="sdr_sheet",
+                        help="Which sheet of the SDR workbook to validate")
+    parser.add_argument("--ga4-id", dest="ga4_id",
+                        help="GA4 measurement ID to validate against, e.g. G-XXXXXXX")
+    parser.add_argument("--ga4-mode", dest="ga4_mode", default="specific",
+                        help="'specific' = only the chosen GA4 property counts; 'any' = any property")
+    parser.add_argument("--qa-column", dest="qa_column",
+                        help="Which QA column to fill in the SDR (e.g. 'Live/Prod QA')")
+    parser.add_argument("--list-sdr-sheets", dest="list_sdr_sheets_path",
+                        help="Print the sheets in an SDR workbook as JSON, then exit")
     args = parser.parse_args()
+
+    # Sheet discovery for the UI picker — cheap, no browser needed.
+    if args.list_sdr_sheets_path:
+        try:
+            print(json.dumps(list_sdr_sheets(args.list_sdr_sheets_path), indent=2))
+        except Exception as e:
+            print(json.dumps({"error": str(e)[:200]}))
+        return
 
     # ---- SDR mode runs an entirely different audit pipeline ----
     if args.mode == 'sdr':
@@ -4036,60 +4746,121 @@ async def main():
             sys.stdout.write(f"[SDR] SDR file not found: {sdr_path}\n"); sys.stdout.flush()
             return
 
+        sheet_name = (getattr(args, 'sdr_sheet', '') or '').strip() or None
+        ga4_id = (getattr(args, 'ga4_id', '') or '').strip()
+        ga4_mode = (getattr(args, 'ga4_mode', '') or 'specific').strip()
+
         start_url = (args.start_url or '').strip()
         if not start_url:
-            cases = parse_sdr_file(sdr_path)
-            for c in cases:
+            probe = parse_sdr_file(sdr_path, sheet_name)
+            for c in probe.get("cases", []):
                 pu = c.get("page_url", "")
-                if pu and pu.lower() != 'global' and pu.startswith('http'):
+                if pu and pu.lower().startswith('http'):
                     start_url = pu
                     break
             if not start_url:
-                for c in cases:
+                for c in probe.get("cases", []):
                     lu = c.get("link_url", "")
                     if lu.startswith('http'):
-                        from urllib.parse import urlparse
-                        p = urlparse(lu)
-                        start_url = f"{p.scheme}://{p.netloc}/"
+                        from urllib.parse import urlparse as _up
+                        _p = _up(lu)
+                        start_url = f"{_p.scheme}://{_p.netloc}/"
                         break
         if not start_url:
             sys.stdout.write("[SDR] Could not determine start URL — pass --start-url\n"); sys.stdout.flush()
             return
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
-            sdr_results = await validate_sdr(browser, sdr_path, start_url)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
+            sdr_out = await validate_sdr(browser, sdr_path, start_url,
+                                         sheet_name=sheet_name,
+                                         ga4_id=ga4_id, ga4_mode=ga4_mode)
             await browser.close()
 
-        # Persist rich JSON + a flat Excel report.
+        meta = sdr_out.get("meta", {})
+        results = sdr_out.get("results", [])
+
+        # Group failures by parameter. A convention mismatch (the SDR writes
+        # "navigation_link", the site sends "navigation link") shows up as a
+        # failure on every single row, which reads like a hundred separate
+        # bugs. Naming the pattern once tells the reader it is one fix.
+        from collections import Counter as _Ctr
+        param_fails = _Ctr()
+        sep_only = _Ctr()
+        for r in results:
+            for d in r.get("param_diff", []):
+                if d["match"]:
+                    continue
+                param_fails[d["param"]] += 1
+                e_norm = re.sub(r'[\s_\-]+', ' ', str(d["expected"]).strip().lower())
+                a_norm = re.sub(r'[\s_\-]+', ' ', str(d["actual"] or '').strip().lower())
+                if a_norm and e_norm == a_norm:
+                    sep_only[d["param"]] += 1
+        patterns = []
+        for pname, n in param_fails.most_common():
+            entry = {"param": pname, "failed_rows": n,
+                     "separator_only": sep_only.get(pname, 0)}
+            if sep_only.get(pname, 0) == n:
+                entry["note"] = ("values are identical apart from separators "
+                                 "(SDR uses underscores, site sends spaces) — one convention fix")
+            elif not sep_only.get(pname, 0):
+                entry["note"] = "genuinely different or not sent"
+            patterns.append(entry)
+        if patterns:
+            sys.stdout.write("[SDR] --- failure patterns (one root cause each) ---\n")
+            for p in patterns[:8]:
+                sys.stdout.write(f"[SDR]   {p['param']}: {p['failed_rows']} row(s)"
+                                 f"{' — ' + p['note'] if p.get('note') else ''}\n")
+            sys.stdout.flush()
+
         with open('sdr_results.json', 'w', encoding='utf-8') as f:
             json.dump({"generated": datetime.datetime.now().isoformat(),
-                       "start_url": start_url, "results": sdr_results}, f, indent=2, default=str)
+                       "start_url": start_url,
+                       "sheet": meta.get("sheet", ""),
+                       "ga4_id": sdr_out.get("ga4_id", ""),
+                       "detected_ga4_ids": sdr_out.get("detected_ga4_ids", []),
+                       "failure_patterns": patterns,
+                       "results": results}, f, indent=2, default=str)
 
+        # 1) Flat report — one row per SDR case, with the reason spelled out.
         flat_rows = []
-        for r in sdr_results:
-            failed = [p for p in r["param_results"] if not p["match"]]
+        for r in results:
+            failed = [d for d in r.get("param_diff", []) if not d["match"]]
             flat_rows.append({
-                "Row": r["row_index"],
-                "Page": r["page_url"],
+                "SDR Row": r["excel_row"],
+                "Page URL": r["page_url"],
                 "Location": r["location"],
-                "Link Text": r["link_text"],
-                "Link URL": r["link_url"],
+                "Link/Button Name": r["button_name"],
                 "Expected Event": r["expected_event"],
-                "Element Found": "Yes" if r["element_found"] else "No",
-                "Clicked": "Yes" if r["clicked"] else "No",
-                "Event Fired": "Yes" if r["event_match"] else "No",
-                "Actual Events": ", ".join(r["actual_events"]) or "-",
-                "Params Passed": r["params_passed"],
-                "Params Failed": r["params_failed"],
+                "Actual Event": r.get("actual_event", "") or "-",
+                "GA4 Property": r.get("measurement_id", "") or "-",
+                "Result": r["status"],
+                "Why Failed": r["reason"] or "-",
                 "Failed Params": "; ".join(
-                    f"{p['param']}: expected '{p['expected']}', got '{p['actual']}'" for p in failed) or "-",
-                "Result": r["overall"],
-                "Fail Reason": r["fail_reason"],
+                    f"{d['param']}: expected '{d['expected']}', got '{d['actual'] or '(not sent)'}'"
+                    for d in failed) or "-",
+                "All Events Fired": ", ".join(r.get("fired_events", [])) or "-",
+                "Matched Element": r.get("matched_element", ""),
+                "Click Method": r.get("click_method", ""),
+                "Click Verified": "Yes" if r.get("click_verified") else "No",
             })
         pd.DataFrame(flat_rows).to_excel('sdr_results.xlsx', index=False)
-        passed = sum(1 for r in sdr_results if r["overall"] == "PASS")
-        sys.stdout.write(f"[SDR] Done: {passed}/{len(sdr_results)} test cases passed\n"); sys.stdout.flush()
+
+        # 2) The operator's own SDR, filled in. This is the deliverable they
+        #    actually hand over: the same sheet, same rows, with the QA column
+        #    marked Pass/Fail and the reason written in the column beside it.
+        try:
+            write_sdr_verdicts(sdr_path, meta, results, 'sdr_filled.xlsx',
+                               qa_column=(getattr(args, 'qa_column', '') or ''))
+            sys.stdout.write("[SDR] Wrote sdr_filled.xlsx (your SDR with QA + reason columns)\n")
+        except Exception as e:
+            sys.stdout.write(f"[SDR] [WARN] could not write filled SDR: {str(e)[:140]}\n")
+
+        passed = sum(1 for r in results if r["status"] == "PASS")
+        sys.stdout.write(f"[SDR] Done: {passed}/{len(results)} test cases passed\n")
+        sys.stdout.flush()
         return
 
     input_file, output_file = "input_sites.xlsx", "validation_results.xlsx"

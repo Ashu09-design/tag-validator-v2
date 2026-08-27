@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const XLSX = require('xlsx');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const cors = require('cors');
 const cron = require('node-cron');
 
@@ -125,6 +125,109 @@ app.get('/api/tag-validator/download', (req, res) => {
         return res.status(404).send('No report yet — run a validation first.');
     const label = { tealium: 'Tealium-Adobe', ga4: 'GA4-GTM', pixels: 'Marketing-Pixels', clicks: 'Click-Tracking' }[lastRunMode] || lastRunMode;
     res.download(p, `Report-${label}.xlsx`);
+});
+
+// ============================================================
+// SDR VALIDATION — automate a manual Solution Design Reference QA pass.
+// The operator uploads their own SDR workbook, picks the sheet and the GA4
+// property to validate against, and gets the same sheet back with the QA
+// column filled in and a reason beside every failure.
+// ============================================================
+
+const SDR_PATH = path.join(__dirname, 'sdr_input.xlsx');
+
+app.post('/api/sdr/upload', upload.single('file'), (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    try {
+        fs.copyFileSync(req.file.path, SDR_PATH);
+        try { fs.unlinkSync(req.file.path); } catch {}
+    } catch (e) {
+        return res.status(500).json({ error: 'Could not save file: ' + e.message });
+    }
+    // Read the sheet list straight away so the UI can offer a picker.
+    const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+    execFile(pyCmd, ['bulk_tag_validator.py', '--list-sdr-sheets', SDR_PATH],
+        { cwd: __dirname, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout) => {
+            if (err) return res.json({ success: true, originalName: req.file.originalname, sheets: [] });
+            let sheets = [];
+            try { sheets = JSON.parse(stdout); } catch {}
+            res.json({ success: true, originalName: req.file.originalname, sheets });
+        });
+});
+
+app.get('/api/sdr/sheets', (req, res) => {
+    if (!fs.existsSync(SDR_PATH)) return res.json({ sheets: [] });
+    const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+    execFile(pyCmd, ['bulk_tag_validator.py', '--list-sdr-sheets', SDR_PATH],
+        { cwd: __dirname, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout) => {
+            if (err) return res.json({ sheets: [], error: String(err).slice(0, 200) });
+            let sheets = [];
+            try { sheets = JSON.parse(stdout); } catch {}
+            res.json({ sheets });
+        });
+});
+
+// Detect which GA4 properties a page actually sends to, so the operator picks
+// from real IDs instead of typing one from memory.
+app.post('/api/sdr/detect-ga4', (req, res) => {
+    if (validatorProcess) return res.status(400).json({ error: 'Another run is in progress' });
+    const url = (req.body && req.body.url || '').trim();
+    if (!url) return res.status(400).json({ error: 'URL required' });
+    const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+    execFile(pyCmd, ['detect_ga4.py', url], { cwd: __dirname, maxBuffer: 4 * 1024 * 1024, timeout: 120000 },
+        (err, stdout) => {
+            let out = { ids: [], gtm: [] };
+            try { out = JSON.parse(stdout); } catch {}
+            if (err && !out.ids.length) out.error = String(err).slice(0, 200);
+            res.json(out);
+        });
+});
+
+app.post('/api/sdr/run', (req, res) => {
+    if (validatorProcess) return res.status(400).json({ error: 'Running' });
+    if (!fs.existsSync(SDR_PATH)) return res.status(400).json({ error: 'Upload an SDR file first' });
+    const { sheet, ga4Id, startUrl, qaColumn } = req.body || {};
+    if (!ga4Id) return res.status(400).json({ error: 'Select which GA4 measurement ID to validate against' });
+
+    const args = ['-u', 'bulk_tag_validator.py', '--mode', 'sdr', '--sdr', SDR_PATH,
+                  '--ga4-id', ga4Id, '--ga4-mode', 'specific'];
+    if (sheet) args.push('--sdr-sheet', sheet);
+    if (startUrl) args.push('--start-url', startUrl);
+    if (qaColumn) args.push('--qa-column', qaColumn);
+
+    lastRunMode = 'sdr';
+    cancelRequested = false;
+    validatorLogs = [`Starting SDR validation — sheet "${sheet || '(auto)'}" against ${ga4Id}...`];
+    const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+    validatorProcess = spawn(pyCmd, args, { cwd: __dirname });
+    validatorProcess.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
+    validatorProcess.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
+    validatorProcess.on('close', code => {
+        validatorLogs.push(cancelRequested ? 'Run cancelled.' : `Finished with code ${code}`);
+        validatorProcess = null;
+    });
+    res.json({ success: true });
+});
+
+app.get('/api/sdr/results', (req, res) => {
+    const p = path.join(__dirname, 'sdr_results.json');
+    if (!fs.existsSync(p)) return res.json({ results: [] });
+    try {
+        res.json(JSON.parse(fs.readFileSync(p, 'utf8')));
+    } catch {
+        res.json({ results: [] });
+    }
+});
+
+// Two downloads: the operator's own SDR with verdicts filled in (what they
+// hand over), and a flat one-row-per-case report.
+app.get('/api/sdr/download', (req, res) => {
+    const which = (req.query.type || 'filled') === 'report' ? 'sdr_results.xlsx' : 'sdr_filled.xlsx';
+    const p = path.join(__dirname, which);
+    if (!fs.existsSync(p)) return res.status(404).send('No SDR report yet — run a validation first.');
+    res.download(p, which === 'sdr_filled.xlsx' ? 'SDR-QA-Filled.xlsx' : 'SDR-QA-Report.xlsx');
 });
 
 // === DOMAIN CRAWL: discover same-domain URLs ===
