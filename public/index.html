@@ -1121,8 +1121,10 @@
                 <p style="font-size:0.78rem;color:var(--muted);margin-bottom:16px;line-height:1.55">
                     Upload your SDR. Every row is opened, its button is clicked for real, and the
                     GA4 event plus <b>all</b> expected parameters are compared against what actually
-                    fired. You get your own sheet back with the QA column filled in and the reason
-                    for each failure written beside it.
+                    fired. You get your workbook back <b>exactly as you sent it</b> — same tabs,
+                    same columns, same headers — with only the QA column filled in. The reason a row
+                    failed sits on that cell as a hover note, and the full evidence goes into one
+                    extra sheet, <b>Tool QA Details</b>.
                 </p>
 
                 <!-- Step 1: file -->
@@ -1180,8 +1182,8 @@
                     <button id="sdrRunBtn" class="btn btn-primary" disabled>Run SDR QA</button>
                     <button id="sdrResumeBtn" class="btn hidden" title="Continue where the last run stopped instead of re-testing every row">▶ Resume previous run</button>
                     <button id="sdrCancelBtn" class="btn btn-danger hidden">Cancel</button>
-                    <a id="sdrDownloadFilled" class="btn hidden" href="/api/sdr/download?type=filled">⬇ Filled SDR</a>
-                    <a id="sdrDownloadReport" class="btn hidden" href="/api/sdr/download?type=report">⬇ Flat Report</a>
+                    <a id="sdrDownloadFilled" class="btn btn-primary hidden" href="/api/sdr/download?type=filled" title="Your own workbook, unchanged, with the QA column filled in — plus a Tool QA Details sheet holding the evidence">⬇ Your SDR (filled in)</a>
+                    <a id="sdrDownloadReport" class="btn hidden" href="/api/sdr/download?type=report" title="One row per test case, as a plain table">⬇ Flat report</a>
                 </div>
 
                 <div id="sdrLog" class="hidden" style="margin-top:16px;background:var(--inset-bg);border-radius:8px;padding:12px;max-height:220px;overflow:auto;font-family:monospace;font-size:0.68rem;line-height:1.6;color:var(--muted)"></div>

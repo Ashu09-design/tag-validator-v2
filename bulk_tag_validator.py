@@ -5032,18 +5032,28 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             "detected_ga4_ids": sorted(detected_ids), "ga4_id": ga4_id}
 
 
+QA_DETAIL_SHEET = "Tool QA Details"
+
+
 def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
     """Write the verdicts back into a copy of the operator's own SDR.
 
-    The whole point of the SDR is that it is *their* sheet — same tabs, same
-    rows, same order. So rather than handing back a foreign report, this fills
-    the QA column they already use with Pass / Fail and adds a reason column
-    immediately beside it saying exactly why a row failed (which parameter,
-    expected vs actual). Failed rows are tinted red and passes green so the
-    sheet can be skimmed the way a manual QA pass would be.
+    Two things have to be true at once, so the workbook carries both:
+
+    * The SDR sheet itself stays EXACTLY as it was handed over — same tabs,
+      same columns, same headers, same order. Nothing is inserted. Only the QA
+      column the team already uses gets filled in with Pass / Fail, so the
+      sheet drops straight back into their process. The reason a row failed is
+      attached as a cell note on that verdict, which carries the detail
+      without altering the layout.
+
+    * The full evidence still has to be somewhere, so it goes into a separate
+      "Tool QA Details" sheet: what fired, on which property, which parameters
+      differed and how the element was matched.
     """
     import openpyxl
-    from openpyxl.styles import PatternFill, Font
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.comments import Comment
     from openpyxl.utils import get_column_letter
 
     wb = openpyxl.load_workbook(sdr_path)
@@ -5067,33 +5077,19 @@ def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
     if target_col is None and qa_cols:
         target_col = list(qa_cols.values())[0]
     if target_col is None:
+        # No QA column at all — only then is one added, at the end, because
+        # there is nowhere else for a verdict to go.
         target_col = ws.max_column + 1
         ws.cell(header_row, target_col).value = "Live/Prod QA"
-
-    # Reason column goes immediately to the right of the QA verdict, inserting
-    # a fresh column so nothing already in the sheet is overwritten.
-    reason_col = target_col + 1
-    existing = str(ws.cell(header_row, reason_col).value or '').strip().lower()
-    if existing != 'qa fail reason':
-        ws.insert_cols(reason_col)
-        ws.cell(header_row, reason_col).value = "QA Fail Reason"
-    detail_col = reason_col + 1
-    existing2 = str(ws.cell(header_row, detail_col).value or '').strip().lower()
-    if existing2 != 'actual event fired':
-        ws.insert_cols(detail_col)
-        ws.cell(header_row, detail_col).value = "Actual Event Fired"
-
-    for c in (target_col, reason_col, detail_col):
-        ws.cell(header_row, c).font = Font(bold=True)
-    ws.column_dimensions[get_column_letter(reason_col)].width = 60
-    ws.column_dimensions[get_column_letter(detail_col)].width = 24
+        ws.cell(header_row, target_col).font = Font(bold=True)
 
     fill_pass = PatternFill("solid", fgColor="C6EFCE")
+    fill_note = PatternFill("solid", fgColor="FFF2CC")
     fill_fail = PatternFill("solid", fgColor="FFC7CE")
-    fill_skip = PatternFill("solid", fgColor="FFEB9C")
+    fill_skip = PatternFill("solid", fgColor="E7E6E6")
     font_pass = Font(color="006100", bold=True)
     font_fail = Font(color="9C0006", bold=True)
-    font_skip = Font(color="9C6500", bold=True)
+    font_skip = Font(color="595959", bold=True)
 
     for r in results:
         row = r.get("excel_row")
@@ -5101,31 +5097,78 @@ def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
             continue
         status = r.get("status", "")
         verdict = {"PASS": "Pass", "FAIL": "Fail", "SKIPPED": "Not Tested"}.get(status, status)
+        reason = (r.get("reason") or "").strip()
         cell = ws.cell(row, target_col)
         cell.value = verdict
         if status == "PASS":
-            cell.fill, cell.font = fill_pass, font_pass
+            cell.fill = fill_note if reason else fill_pass
+            cell.font = font_pass
         elif status == "FAIL":
             cell.fill, cell.font = fill_fail, font_fail
         else:
             cell.fill, cell.font = fill_skip, font_skip
+        # The explanation rides along as a note so the columns stay untouched.
+        if reason:
+            try:
+                c = Comment(reason[:1500], "Tag Validator")
+                c.width, c.height = 420, 160
+                cell.comment = c
+            except Exception:
+                pass
 
-        reason = r.get("reason", "") or ""
-        rc = ws.cell(row, reason_col)
-        rc.value = reason
-        rc.alignment = openpyxl.styles.Alignment(wrap_text=True, vertical="top")
-        if status == "FAIL":
-            rc.fill = fill_fail
-        elif reason:
-            # A pass that carries a note (a spacing or punctuation difference
-            # between the sheet and the tag) is tinted separately so it reads
-            # as "fine, but worth tidying" rather than as a clean pass.
-            rc.fill = PatternFill("solid", fgColor="FFF2CC")
+    # ---- the evidence sheet ----
+    if QA_DETAIL_SHEET in wb.sheetnames:
+        del wb[QA_DETAIL_SHEET]
+    det = wb.create_sheet(QA_DETAIL_SHEET)
+    headers = ["SDR Row", "Page URL", "Location", "Link/Button Name",
+               "Expected Event", "Actual Event", "GA4 Property", "Result",
+               "Why It Failed / Notes", "Parameter Differences",
+               "All Events Fired", "Element Clicked", "Click Method",
+               "Click Verified"]
+    det.append(headers)
+    for c in range(1, len(headers) + 1):
+        h = det.cell(1, c)
+        h.font = Font(bold=True, color="FFFFFF")
+        h.fill = PatternFill("solid", fgColor="4472C4")
+        h.alignment = Alignment(vertical="center")
+    det.freeze_panes = "A2"
 
-        actual = r.get("actual_event", "") or ""
-        mid = r.get("measurement_id", "") or ""
-        ws.cell(row, detail_col).value = (f"{actual} [{mid}]" if actual and mid
-                                          else actual or "-")
+    for r in sorted(results, key=lambda x: x.get("excel_row") or 0):
+        diffs = "; ".join(
+            f"{d['param']}: expected '{d['expected']}', got '{d['actual'] or '(not sent)'}'"
+            + (" [spacing only — passed]" if d.get("cosmetic") else "")
+            for d in r.get("param_diff", []) if not d["match"] or d.get("cosmetic")
+        )
+        det.append([
+            r.get("excel_row"),
+            r.get("page_url", ""),
+            r.get("location", ""),
+            r.get("button_name", ""),
+            r.get("expected_event", ""),
+            r.get("actual_event", "") or "-",
+            r.get("measurement_id", "") or "-",
+            {"PASS": "Pass", "FAIL": "Fail", "SKIPPED": "Not Tested"}.get(r.get("status"), r.get("status")),
+            r.get("reason", "") or "",
+            diffs or "-",
+            ", ".join(r.get("fired_events", [])) or "-",
+            r.get("matched_element", "") or "-",
+            r.get("click_method", "") or "-",
+            "Yes" if r.get("click_verified") else "No",
+        ])
+
+    widths = [9, 42, 22, 32, 20, 20, 18, 11, 70, 60, 30, 34, 14, 13]
+    for i, w in enumerate(widths, start=1):
+        det.column_dimensions[get_column_letter(i)].width = w
+    for row in det.iter_rows(min_row=2, max_row=det.max_row):
+        row[8].alignment = Alignment(wrap_text=True, vertical="top")
+        row[9].alignment = Alignment(wrap_text=True, vertical="top")
+        v = row[7].value
+        if v == "Fail":
+            row[7].fill, row[7].font = fill_fail, font_fail
+        elif v == "Pass":
+            row[7].fill, row[7].font = fill_pass, font_pass
+        else:
+            row[7].fill, row[7].font = fill_skip, font_skip
 
     wb.save(out_path)
     return out_path
