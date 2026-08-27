@@ -1546,9 +1546,29 @@ DISCOVER_CLICKABLES_JS = r"""
             const isDownload = (dlAttr !== null && dlAttr !== undefined)
                 || /\.(pdf|docx?|xlsx?|pptx?|zip|csv|txt|rtf|dmg|exe|pkg|mp4|mp3|wav|avi|mov)(\?|#|$)/i.test(href);
 
+            // Nearest enclosing heading / card title. SDRs routinely have a
+            // dozen rows whose Link/Button Name is identical ("Read more")
+            // and distinguish them only by Location ("body - krista
+            // martins"), so the element needs to carry the label of the card
+            // it sits in or those rows cannot be told apart.
+            let context = '';
+            try {
+                let n = el;
+                for (let i = 0; i < 8 && n; i++) {
+                    n = n.parentElement;
+                    if (!n) break;
+                    const h = n.querySelector('h1,h2,h3,h4,h5,h6,[class*="title"],[class*="heading"],[class*="name"]');
+                    if (h) {
+                        const ht = (h.innerText || h.textContent || '').replace(/\s+/g, ' ').trim();
+                        if (ht && ht.length <= 90) { context = ht; break; }
+                    }
+                }
+            } catch (e) {}
+
             results.push({
                 selector: buildSelector(el),
                 uid: uid,
+                context: context,
                 tag: el.tagName,
                 text: text || `[${el.tagName.toLowerCase()}]`,
                 href: href,
@@ -1982,8 +2002,15 @@ FINAL_DRAIN_WAIT = 9.0
 # to see EVERY property a dual-tagged site sends to, or it would report an
 # event as missing from a property that simply answered a few seconds later.
 # So it waits longer, and never closes the window before the minimum.
-SDR_MIN_BEACON_WAIT = 7.5
-SDR_BEACON_MAX_WAIT = 14.0
+#
+# These are deliberately generous. A row wrongly marked Fail costs a person
+# far more time to chase down than the extra seconds cost the run, and the
+# observed spread on these sites runs to ~5s for the first hit with the
+# second property following behind it.
+SDR_MIN_BEACON_WAIT = 10.0
+SDR_BEACON_MAX_WAIT = 20.0
+# How long to let a page settle before touching it.
+SDR_PAGE_SETTLE = 4.0
 
 # Read AND clear Adobe ActivityMap's s_sq cookie. ActivityMap records the
 # clicked link into s_sq at click time and only transmits it with the NEXT
@@ -4030,6 +4057,76 @@ def _sdr_label_norm(v):
     return re.sub(r'\s+', ' ', s).strip()
 
 
+def _sdr_location_detail(case):
+    """The specific part of an SDR Location, minus the page region.
+
+    "body - krista martins" -> "krista martins". That remainder names the card
+    or section a control sits in, and is often the only thing distinguishing
+    a dozen rows that all say "Read more".
+    """
+    raw = str(case.get('location') or '')
+    return re.sub(r'^\s*(body|header|footer|menu|nav)\s*[-–:]\s*', '', raw, flags=re.I).strip()
+
+
+# Differences that are cosmetic rather than functional. An SDR is written by
+# hand, so it says "navigation_link" where the tag sends "navigation link",
+# or omits a trailing question mark. The value being reported IS the intended
+# one; flagging these as failures buries the handful of real defects under a
+# hundred spelling notes. They pass, with the difference recorded so the sheet
+# can still be tidied up later.
+def _sdr_cosmetic_key(v):
+    s = _norm_str(v)
+    s = s.replace('&', ' and ')
+    s = re.sub(r'[_\-–—/\\.:;,!?\'"“”‘’()\[\]]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s)
+    return s.strip()
+
+
+def _sdr_cosmetic_match(expected, actual):
+    """True when the two differ only in separators, case, punctuation or
+    spacing — i.e. the same value written two ways."""
+    if actual is None:
+        return False
+    e, a = _sdr_cosmetic_key(expected), _sdr_cosmetic_key(actual)
+    return bool(e) and e == a
+
+
+def _sdr_find_in_datalayer(api_events, pname):
+    """Look for a parameter inside the data-layer pushes a click produced.
+
+    An SDR column names a GA4 parameter, but row 1 of these sheets also
+    records where the value comes from in the site's own EMU/Segment layer.
+    When GA4 does not carry the value it matters enormously whether the site
+    simply never produces it, or produces it and the tag fails to map it —
+    the first is a site fix, the second a tag fix. Pushes nest values under
+    `event_data`, so the search is recursive.
+    """
+    target = str(pname or '').lower().replace('_', '')
+    if not target:
+        return None
+
+    def _walk(node, depth=0):
+        if depth > 4 or not isinstance(node, dict):
+            return None
+        for k, v in node.items():
+            if str(k).lower().replace('_', '') == target and isinstance(v, (str, int, float, bool)):
+                return str(v)
+        for v in node.values():
+            if isinstance(v, dict):
+                got = _walk(v, depth + 1)
+                if got is not None:
+                    return got
+        return None
+
+    for ev in api_events or []:
+        for source in (ev.get("raw"), ev.get("params")):
+            if isinstance(source, dict):
+                got = _walk(source)
+                if got is not None:
+                    return got
+    return None
+
+
 def _sdr_actual_value(params, pname):
     """Read a parameter out of a captured hit.
 
@@ -4123,6 +4220,23 @@ def _sdr_score_element(case, el, base_url=""):
     ltext_score = _agree(case.get('link_text') or '')
     text_score = max(name_score, ltext_score)
     score += text_score
+
+    # The SDR's Location often names the card or section the control sits in
+    # ("body - krista martins"). When several controls share a name, that is
+    # the only thing that tells them apart, so compare it against the
+    # element's enclosing heading.
+    loc_detail = _sdr_location_detail(case)
+    if loc_detail and len(loc_detail) > 3:
+        ctx = _sdr_label_norm(el.get('context'))
+        if ctx:
+            d_norm = _sdr_label_norm(loc_detail)
+            if d_norm and (d_norm == ctx or d_norm in ctx or ctx in d_norm):
+                score += 7
+            else:
+                dt = {t for t in re.split(r'[^a-z0-9]+', d_norm) if len(t) > 2}
+                ct = {t for t in re.split(r'[^a-z0-9]+', ctx) if len(t) > 2}
+                if dt and ct and len(dt & ct) / len(dt) >= 0.6:
+                    score += 4
 
     loc = (case.get('location') or '').lower()
     if loc:
@@ -4337,13 +4451,13 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 _record(c, "FAIL", f"Page did not load: {str(e)[:90]}")
             continue
 
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
         await accept_cookies(page)
         try:
-            await page.wait_for_load_state("networkidle", timeout=12000)
+            await page.wait_for_load_state("networkidle", timeout=20000)
         except Exception:
             pass
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(SDR_PAGE_SETTLE)
 
         # Same preparation the click audit uses: keep clicks on-page, open
         # every menu so hidden targets exist, wrap the tracking APIs, and get
@@ -4450,6 +4564,13 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         except Exception:
             pass
 
+        # Whole-page text, used to tell "this content is gone from the site"
+        # apart from "the control is here but did not match this row".
+        try:
+            page_text = _norm_str(await page.evaluate("() => document.body.innerText"))
+        except Exception:
+            page_text = ""
+
         # The menu-expansion sweep above found things that are not visible in
         # the page's resting state; keep that as a fallback pool.
         base_elements = list(discovered.values())
@@ -4540,9 +4661,24 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 if bs2 > best_score:
                     best, best_score = b2, bs2
             if best is None or best_score < 4:
+                # Distinguish "this content is no longer on the page" from
+                # "the control is there but could not be matched". The first
+                # means the SDR has drifted from the live site and the row
+                # needs rewriting; the second is a matching problem. Guessing
+                # between them wastes the reader's time.
+                detail = ""
+                probe = (_sdr_location_detail(case) or case.get("button_name") or "").strip()
+                if probe and page_text:
+                    if _norm_str(probe) and _norm_str(probe) not in page_text:
+                        detail = (f" — the text '{probe}' does not appear anywhere on this page,"
+                                  f" so this content looks to have been removed or moved since"
+                                  f" the SDR was written")
+                    else:
+                        detail = (f" — '{probe}' does appear on the page, so the control exists"
+                                  f" but could not be matched to this row")
                 _record(case, "FAIL",
                         f"Element not found on page (looked for name '{case.get('button_name')}'"
-                        f"{', url ' + case['link_url'] if case.get('link_url') else ''})")
+                        f"{', url ' + case['link_url'] if case.get('link_url') else ''}){detail}")
                 sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> NOT FOUND\n")
                 sys.stdout.flush()
                 continue
@@ -4566,10 +4702,10 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             except Exception:
                 pass
             try:
-                await loc_el.scroll_into_view_if_needed(timeout=1500)
+                await loc_el.scroll_into_view_if_needed(timeout=2500)
             except Exception:
                 pass
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.6)
 
             # --- drain, then open this case's capture window ---
             try:
@@ -4652,7 +4788,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 continue
 
             # --- wait for the beacon, then close the window ---
-            await asyncio.sleep(0.6)
+            await asyncio.sleep(1.0)
             try:
                 early = await page.evaluate(PEEK_TRACKING_JS)
             except Exception:
@@ -4669,7 +4805,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             min_wait = SDR_MIN_BEACON_WAIT if expect else 0.8
             deadline = started + (SDR_BEACON_MAX_WAIT if expect else CLICK_IDLE_WAIT)
             last_n, last_change = len(all_requests), time.time()
-            quiet = 1.5 if expect else 0.6
+            quiet = 2.0 if expect else 0.8
             while time.time() < deadline:
                 await asyncio.sleep(0.25)
                 if len(all_requests) != last_n:
@@ -4710,6 +4846,12 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                             "measurement_id": "(dataLayer)",
                             "params": {k: v for k, v in det.items()
                                        if k != "event" and isinstance(v, (str, int, float, bool))},
+                            # Keep the push intact as well. These layers nest
+                            # most of the interesting values under event_data,
+                            # and flattening to scalars threw them away — which
+                            # is what made "the tag doesn't map it" look
+                            # identical to "the site never produces it".
+                            "raw": det,
                         })
 
             # Only hits on the selected GA4 property count as evidence.
@@ -4721,7 +4863,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             expected_event = case["expected_event"]
             cands = [e for e in scoped if _norm_str(e.get("event")) == _norm_str(expected_event)]
 
-            reasons, param_diff = [], []
+            reasons, param_diff, notes = [], [], []
             matched = None
             if cands:
                 # Several hits can carry the same event name; judge against the
@@ -4755,22 +4897,42 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 for pname, pexp in case["expected_params"].items():
                     pact = _sdr_actual_value(actual_params, pname)
                     ok = _sdr_param_matches(pname, pexp, pact, page_url)
+                    cosmetic = False
+                    if not ok and _sdr_cosmetic_match(pexp, pact):
+                        # Same value, written differently. Counts as a pass.
+                        ok = True
+                        cosmetic = True
+                        notes.append(f"{pname}: SDR says '{pexp}', site sends '{pact}' "
+                                     f"(spacing/punctuation only)")
                     param_diff.append({"param": pname, "expected": pexp,
-                                       "actual": "" if pact is None else str(pact), "match": ok})
+                                       "actual": "" if pact is None else str(pact),
+                                       "match": ok, "cosmetic": cosmetic})
                     if not ok:
                         if pact is None or str(pact) == "":
-                            # Distinguish "this event omitted it" from "the site
-                            # never sends it at all" — very different fixes.
+                            # Three very different faults look identical here,
+                            # and they need different fixes:
+                            #   * the value is in the data layer but the GA4
+                            #     tag never maps it  -> fix the tag
+                            #   * other hits carry it, this one does not
+                            #     -> fix this event's config
+                            #   * nothing produces it at all -> fix the site
                             anywhere = any(
                                 _sdr_actual_value(e.get("params") or {}, pname) not in (None, "")
                                 for e in net_events)
-                            if anywhere:
+                            in_dl = _sdr_find_in_datalayer(api_events, pname)
+                            if in_dl is not None:
+                                same = _sdr_cosmetic_match(pexp, in_dl)
+                                reasons.append(
+                                    f"{pname}: expected '{pexp}' — the value is in the data layer"
+                                    f" ({'matching' if same else repr(in_dl)}) but the GA4 tag does"
+                                    f" not send it as an event parameter")
+                            elif anywhere:
                                 reasons.append(
                                     f"{pname}: expected '{pexp}' but not sent on this event "
                                     f"(it is present on other hits)")
                             else:
                                 reasons.append(
-                                    f"{pname}: expected '{pexp}' but never sent by the site")
+                                    f"{pname}: expected '{pexp}' but nothing on the page produces it")
                         else:
                             note = ""
                             # When the value the site sent matches THIS row's
@@ -4797,8 +4959,12 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             if status == "PASS" and not verified:
                 # Everything matched, but we could not prove the click landed on
                 # this exact element — say so rather than quietly passing it.
-                status = "PASS"
-                reasons.append("(note) click could not be verified on this exact element")
+                notes.append("click could not be verified on this exact element")
+            # Cosmetic notes ride along with the verdict so a pass still shows
+            # what differed, without turning it into a failure.
+            if notes:
+                prefix = "Passed with notes — " if status == "PASS" else "Also (not counted as failure) — "
+                reasons.append(prefix + "; ".join(notes))
 
             _record(case, status, "; ".join(reasons), {
                 "actual_event": (matched or {}).get("event", ""),
@@ -4946,10 +5112,15 @@ def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
 
         reason = r.get("reason", "") or ""
         rc = ws.cell(row, reason_col)
-        rc.value = reason if status != "PASS" else (reason or "")
+        rc.value = reason
         rc.alignment = openpyxl.styles.Alignment(wrap_text=True, vertical="top")
         if status == "FAIL":
             rc.fill = fill_fail
+        elif reason:
+            # A pass that carries a note (a spacing or punctuation difference
+            # between the sheet and the tag) is tinted separately so it reads
+            # as "fine, but worth tidying" rather than as a clean pass.
+            rc.fill = PatternFill("solid", fgColor="FFF2CC")
 
         actual = r.get("actual_event", "") or ""
         mid = r.get("measurement_id", "") or ""

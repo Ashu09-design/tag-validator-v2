@@ -46,6 +46,10 @@ function killValidatorProcess(reason = 'cancelled by user') {
         try { validatorProcess.kill(); } catch { /* ignore */ }
     }
     validatorLogs.push(`>>> ${reason}`);
+    // Release the slot now. taskkill is asynchronous, and leaving the handle
+    // in place until the process actually exits is what allowed a cancel
+    // aimed at a dead run to be applied to the one that replaced it.
+    validatorProcess = null;
     return true;
 }
 
@@ -81,11 +85,17 @@ app.post('/api/tag-validator/run-single', (req, res) => {
     const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
     validatorProcess = spawn(pyCmd, ['-u', 'bulk_tag_validator.py', '--mode', auditMode], { cwd: __dirname });
 
-    validatorProcess.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
-    validatorProcess.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
-    validatorProcess.on('close', code => {
+    const proc = validatorProcess;
+    proc.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
+    proc.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
+    proc.on('close', code => {
         validatorLogs.push(cancelRequested ? 'Run cancelled.' : `Finished with code ${code}`);
-        validatorProcess = null;
+        // Only clear the handle if it still points at THIS process. A run
+        // that was killed can take seconds to actually exit on Windows, and
+        // by then a newer run may own the slot — nulling it there made the
+        // server believe nothing was running and let a stale cancel land on
+        // the live run.
+        if (validatorProcess === proc) validatorProcess = null;
     });
     res.json({ success: true });
 });
@@ -99,11 +109,17 @@ app.post('/api/tag-validator/run', (req, res) => {
     const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
     validatorProcess = spawn(pyCmd, ['-u', 'bulk_tag_validator.py', '--mode', mode], { cwd: __dirname });
 
-    validatorProcess.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
-    validatorProcess.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
-    validatorProcess.on('close', code => {
+    const proc = validatorProcess;
+    proc.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
+    proc.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
+    proc.on('close', code => {
         validatorLogs.push(cancelRequested ? 'Run cancelled.' : `Finished with code ${code}`);
-        validatorProcess = null;
+        // Only clear the handle if it still points at THIS process. A run
+        // that was killed can take seconds to actually exit on Windows, and
+        // by then a newer run may own the slot — nulling it there made the
+        // server believe nothing was running and let a stale cancel land on
+        // the live run.
+        if (validatorProcess === proc) validatorProcess = null;
     });
     res.json({ success: true });
 });
@@ -208,11 +224,17 @@ app.post('/api/sdr/run', (req, res) => {
     validatorLogs = [`Starting SDR validation — sheet "${sheet || '(auto)'}" against ${ga4Id}...`];
     const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
     validatorProcess = spawn(pyCmd, args, { cwd: __dirname });
-    validatorProcess.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
-    validatorProcess.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
-    validatorProcess.on('close', code => {
+    const proc = validatorProcess;
+    proc.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
+    proc.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
+    proc.on('close', code => {
         validatorLogs.push(cancelRequested ? 'Run cancelled.' : `Finished with code ${code}`);
-        validatorProcess = null;
+        // Only clear the handle if it still points at THIS process. A run
+        // that was killed can take seconds to actually exit on Windows, and
+        // by then a newer run may own the slot — nulling it there made the
+        // server believe nothing was running and let a stale cancel land on
+        // the live run.
+        if (validatorProcess === proc) validatorProcess = null;
     });
     res.json({ success: true });
 });
@@ -254,11 +276,12 @@ app.post('/api/tag-validator/crawl', (req, res) => {
     validatorLogs = [`Crawling ${url} (${max === 0 ? 'unlimited' : 'max ' + max} pages)...`];
     const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
     validatorProcess = spawn(pyCmd, ['-u', 'domain_crawler.py', url, String(max)], { cwd: __dirname });
-    validatorProcess.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
-    validatorProcess.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
-    validatorProcess.on('close', code => {
+    const crawlProc = validatorProcess;
+    crawlProc.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
+    crawlProc.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
+    crawlProc.on('close', code => {
         validatorLogs.push(cancelRequested ? 'Crawl cancelled.' : `Crawl finished with code ${code}`);
-        validatorProcess = null;
+        if (validatorProcess === crawlProc) validatorProcess = null;
     });
     res.json({ success: true });
 });
@@ -282,9 +305,12 @@ app.post('/api/tag-validator/crawl-and-validate', (req, res) => {
     validatorLogs = [`Crawling ${url} (${max === 0 ? 'unlimited' : 'max ' + max} pages)...`];
     const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
     validatorProcess = spawn(pyCmd, ['-u', 'domain_crawler.py', url, String(max)], { cwd: __dirname });
-    validatorProcess.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
-    validatorProcess.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
-    validatorProcess.on('close', code => {
+    const cvProc = validatorProcess;
+    cvProc.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
+    cvProc.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
+    cvProc.on('close', code => {
+        // Another run may already own the slot; never touch it if so.
+        if (validatorProcess !== cvProc) return;
         if (cancelRequested) {
             validatorLogs.push('Crawl cancelled. Validation phase skipped.');
             validatorProcess = null;
@@ -293,11 +319,12 @@ app.post('/api/tag-validator/crawl-and-validate', (req, res) => {
         validatorLogs.push(`Crawl finished (code ${code}). Starting ${auditMode.toUpperCase()} validation...`);
         if (code !== 0) { validatorProcess = null; return; }
         validatorProcess = spawn(pyCmd, ['-u', 'bulk_tag_validator.py', '--mode', auditMode], { cwd: __dirname });
-        validatorProcess.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
-        validatorProcess.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
-        validatorProcess.on('close', c2 => {
+        const valProc = validatorProcess;
+        valProc.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
+        valProc.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
+        valProc.on('close', c2 => {
             validatorLogs.push(cancelRequested ? 'Validation cancelled.' : `Validation finished with code ${c2}`);
-            validatorProcess = null;
+            if (validatorProcess === valProc) validatorProcess = null;
         });
     });
     res.json({ success: true });
