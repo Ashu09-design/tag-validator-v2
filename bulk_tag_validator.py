@@ -3,7 +3,19 @@ warnings.filterwarnings("ignore")
 import asyncio
 import pandas as pd
 from playwright.async_api import async_playwright
-from playwright_stealth import Stealth
+# playwright-stealth changed its public API between 1.x and 2.x. 1.x exposes a
+# module-level `stealth_async(page)`; 2.x exposes a `Stealth` class with
+# `apply_stealth_async(page)`. Pin-free support for both, and degrade to a
+# no-op if the package is missing entirely, so an environment mismatch can
+# never take the whole validator down at import time.
+try:
+    from playwright_stealth import Stealth as _StealthCls
+except ImportError:
+    _StealthCls = None
+try:
+    from playwright_stealth import stealth_async as _stealth_async_fn
+except ImportError:
+    _stealth_async_fn = None
 import os
 import time
 import re
@@ -21,7 +33,53 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-stealth_obj = Stealth()
+class _StealthCompat:
+    """Uniform `apply_stealth_async(page)` across playwright-stealth versions.
+
+    IMPORTANT: playwright-stealth 1.x is deliberately NOT used. Its injected
+    evasion scripts reference helpers that do not exist in the page context
+    ("utils is not defined"), which throws on every page and takes the site's
+    tag manager down with it — GTM stops initialising, dataLayer freezes and
+    no analytics tag ever fires. A click audit run under 1.x therefore reports
+    "no tracking" for a page that is in fact fully tracked. Silently wrong
+    output is far worse than skipping bot-evasion, so 1.x is skipped unless
+    the operator explicitly forces it with TV_FORCE_STEALTH=1.
+    """
+
+    def __init__(self):
+        self._impl = None
+        self._legacy = None
+        self._warned = False
+        if _StealthCls is not None:
+            try:
+                self._impl = _StealthCls()          # 2.x — safe
+            except Exception:
+                self._impl = None
+        if self._impl is None and _stealth_async_fn is not None:
+            if os.environ.get("TV_FORCE_STEALTH") == "1":
+                self._legacy = _stealth_async_fn
+
+    async def apply_stealth_async(self, page):
+        try:
+            if self._impl is not None:
+                await self._impl.apply_stealth_async(page)
+            elif self._legacy is not None:
+                await self._legacy(page)
+            elif _stealth_async_fn is not None and not self._warned:
+                self._warned = True
+                sys.stderr.write(
+                    "[WARN] playwright-stealth 1.x detected and skipped: it breaks "
+                    "page JS (GTM/dataLayer) and would corrupt the audit. "
+                    "Install playwright-stealth>=2.0.0 for stealth support, or set "
+                    "TV_FORCE_STEALTH=1 to use 1.x anyway." + os.linesep)
+                sys.stderr.flush()
+        except Exception:
+            # Stealth is a nice-to-have for bot detection, never a hard
+            # dependency of the audit itself.
+            pass
+
+
+stealth_obj = _StealthCompat()
 CONCURRENCY = 3
 
 COOKIE_SELECTORS = [
@@ -1341,6 +1399,59 @@ DISCOVER_CLICKABLES_JS = r"""
             // is EMPTY for display:none elements — hidden menu links need
             // this), then value, placeholder, aria-label, title, alt — so
             // icon-only buttons / image links still get a meaningful label.
+            // Icon-only and image links are common in headers/footers (logo,
+            // social icons, back-to-top arrows). A bare "[a]" label makes the
+            // report unreadable AND unmatchable during beacon attribution,
+            // so dig for any human-readable name the markup offers.
+            const imgAlt = (sel) => {
+                try {
+                    const n = el.querySelector && el.querySelector(sel);
+                    if (!n) return '';
+                    return (n.getAttribute('alt') || n.getAttribute('aria-label')
+                            || n.getAttribute('title') || n.textContent || '').trim();
+                } catch (e) { return ''; }
+            };
+            // Look for any of `names` on the element, then on up to 4
+            // ancestors — AEM puts the authored title on the wrapping
+            // component div, not on the <a> itself.
+            // Each attribute name is searched across the whole ancestor chain
+            // before moving to the next name, so a descriptive authored title
+            // on a wrapper ("Skinvive by Juvederm") beats a generic component
+            // type sitting closer on the element itself ("imageComponent").
+            const attrUp = (names) => {
+                for (const a of names) {
+                    try {
+                        let n = el, hops = 0;
+                        while (n && n !== document.body && hops < 5) {
+                            const v = n.getAttribute && n.getAttribute(a);
+                            if (v && v.trim() && v.trim() !== 'true' && v.trim() !== 'false') {
+                                return v.trim();
+                            }
+                            n = n.parentElement; hops++;
+                        }
+                    } catch (e) {}
+                }
+                return '';
+            };
+            // "/content/dam/.../close-modal.svg" -> "close modal"
+            const fileLabel = (p) => {
+                try {
+                    if (!p) return '';
+                    let base = String(p).split('?')[0].split('/').pop() || '';
+                    base = base.replace(/\.(svg|png|jpe?g|gif|webp|coreimg.*)$/i, '');
+                    base = base.replace(/[-_.]+/g, ' ').replace(/\s+/g, ' ').trim();
+                    return base.length > 1 ? base : '';
+                } catch (e) { return ''; }
+            };
+            // Last resort before "[button]": a readable form of the id, minus
+            // the random AEM hash suffix (button-fd5bb9814f -> "button").
+            const idLabel = (n) => {
+                try {
+                    let s = (n.id || '').replace(/-[0-9a-f]{6,}$/i, '');
+                    s = s.replace(/[-_]+/g, ' ').trim();
+                    return (s && s.toLowerCase() !== 'button' && s.length > 2) ? s : '';
+                } catch (e) { return ''; }
+            };
             const text = (el.innerText
                 || (el.textContent || '').replace(/\s+/g, ' ').trim()
                 || el.value
@@ -1348,8 +1459,24 @@ DISCOVER_CLICKABLES_JS = r"""
                 || el.getAttribute('aria-label')
                 || el.getAttribute('title')
                 || el.getAttribute('alt')
-                || (el.querySelector && (el.querySelector('img') || {}).alt)
-                || '').trim().substring(0, 80);
+                || imgAlt('img')
+                || imgAlt('picture img')
+                || imgAlt('svg title')
+                || imgAlt('svg')
+                || imgAlt('use')
+                || imgAlt('[aria-label]')
+                || imgAlt('[alt]')
+                // --- AEM / Adobe EMU component metadata ---
+                // Enterprise AEM sites render icon buttons and SVG logos with
+                // no text, no alt and no aria-label; the human name lives in
+                // authoring attributes instead. Without these the report is a
+                // wall of "[button]" rows, and — worse — beacon attribution
+                // loses its text key and can bind a hit to the wrong element.
+                || attrUp(['data-selector-text', 'data-title', 'data-analytics-id',
+                           'data-gtm-attribute', 'aria-label', 'title'])
+                || fileLabel(attrUp(['data-icon-reference', 'data-asset', 'data-cmp-src']))
+                || idLabel(el)
+                || '').replace(/\s+/g, ' ').trim().substring(0, 80);
             const href = (el.href || el.getAttribute('href') || '').trim();
 
             // Tag each element with its page zone so the audit can click
@@ -1395,14 +1522,41 @@ DISCOVER_CLICKABLES_JS = r"""
             if (seen.has(key)) return;
             seen.add(key);
 
+            // STAMP a unique, stable handle straight onto the node. The click
+            // loop locates elements by [data-tvuid="..."] instead of a CSS
+            // path, which removes the whole class of "clicked the wrong
+            // element" bugs: non-unique selectors resolving via .first, and
+            // header/footer duplicates that share text+href. Idempotent —
+            // discovery runs many times (hover/expand passes) and an already
+            // stamped node keeps its original uid.
+            let uid = '';
+            try {
+                uid = el.getAttribute('data-tvuid') || '';
+                if (!uid) {
+                    window.__tvSeq = (window.__tvSeq || 0) + 1;
+                    uid = 'tv' + window.__tvSeq;
+                    el.setAttribute('data-tvuid', uid);
+                }
+            } catch(e) {}
+
+            // Download intent: GA4 file_download / download events only fire
+            // for these, and they need the download-interception path so the
+            // browser doesn't stall on a real file transfer.
+            const dlAttr = el.getAttribute && el.getAttribute('download');
+            const isDownload = (dlAttr !== null && dlAttr !== undefined)
+                || /\.(pdf|docx?|xlsx?|pptx?|zip|csv|txt|rtf|dmg|exe|pkg|mp4|mp3|wav|avi|mov)(\?|#|$)/i.test(href);
+
             results.push({
                 selector: buildSelector(el),
+                uid: uid,
                 tag: el.tagName,
                 text: text || `[${el.tagName.toLowerCase()}]`,
                 href: href,
                 id: el.id || '',
                 zone: zone,
                 hidden: !isVisible(el),   // needs menu re-expansion before click
+                is_download: !!isDownload,
+                target: (el.getAttribute && el.getAttribute('target')) || '',
                 className: (typeof el.className === 'string') ? el.className.substring(0, 100) : '',
             });
         } catch(e) {}
@@ -1523,6 +1677,115 @@ BLOCK_NAVIGATION_JS = r"""
 """
 
 
+# Close any consent UI that is sitting on top of the page.
+#
+# The menu-discovery pass clicks anything that looks like a menu opener, and
+# "Cookies Settings" matches `button[aria-expanded="false"]`. That opens the
+# OneTrust Preference Center, whose full-screen dark filter then covers the
+# entire header for the rest of the audit: every header link hit-tests as
+# obscured, gets clicked by a fallback that the site's own handlers ignore,
+# and is reported as untracked. Consent has already been granted explicitly
+# before this runs, so dismissing the leftover dialog changes no consent
+# state — it just gets the overlay out of the way.
+# Make a covered element reachable by a REAL mouse click.
+#
+# Some clicks open a panel that stays on top of other elements for the rest of
+# the run. Falling back to a JS .click() reaches the right node but produces an
+# untrusted event, and plenty of analytics handlers (Adobe ActivityMap, and
+# this site's own site_link/exit_link handlers) simply ignore those — the
+# element then gets reported as untracked even though it is tagged. Instead,
+# walk the stack of elements sitting over the target and switch off their
+# pointer-events just long enough to deliver a trusted click to the real
+# element. Nothing is hidden or removed, and it is put back immediately after.
+PIERCE_OVERLAY_JS = r"""
+(e) => {
+    // Always undo a previous pierce first. If an earlier one never got its
+    // restore (an exception between click and cleanup), overwriting the
+    // bookkeeping list would strand those nodes with pointer-events:none for
+    // the rest of the audit and quietly break every later element.
+    try {
+        for (const [n, val, pri] of (window.__tvPierced || [])) {
+            if (val) n.style.setProperty('pointer-events', val, pri || '');
+            else n.style.removeProperty('pointer-events');
+        }
+    } catch (err) {}
+    window.__tvPierced = [];
+
+    const r = e.getBoundingClientRect();
+    if (!r.width || !r.height) return {ok: false, reason: 'no-box'};
+    const pts = [
+        [r.x + r.width / 2,    r.y + r.height / 2],
+        [r.x + r.width * 0.25, r.y + r.height / 2],
+        [r.x + r.width * 0.75, r.y + r.height / 2],
+    ].filter(([x, y]) => x >= 0 && y >= 0 && x <= innerWidth && y <= innerHeight);
+    if (!pts.length) return {ok: false, reason: 'offscreen'};
+
+    const touched = [];
+    const hits = (n) => n && (n === e || e.contains(n) || n.contains(e));
+    for (const [x, y] of pts) {
+        for (let guard = 0; guard < 10; guard++) {
+            const top = document.elementFromPoint(x, y);
+            if (hits(top)) {
+                window.__tvPierced = touched;
+                return {ok: true, x: x, y: y, pierced: touched.length};
+            }
+            if (!top || top === document.documentElement || top === document.body) break;
+            touched.push([top, top.style.getPropertyValue('pointer-events'),
+                          top.style.getPropertyPriority('pointer-events')]);
+            top.style.setProperty('pointer-events', 'none', 'important');
+        }
+    }
+    window.__tvPierced = touched;
+    return {ok: false, reason: 'unreachable', pierced: touched.length};
+}
+"""
+
+RESTORE_OVERLAY_JS = r"""
+(() => {
+    const t = window.__tvPierced || [];
+    for (const [n, val, pri] of t) {
+        try {
+            if (val) n.style.setProperty('pointer-events', val, pri || '');
+            else n.style.removeProperty('pointer-events');
+        } catch (e) {}
+    }
+    window.__tvPierced = [];
+    return t.length;
+})()
+"""
+
+CLOSE_CONSENT_UI_JS = r"""
+(() => {
+    let closed = 0;
+    try {
+        if (window.OneTrust && typeof window.OneTrust.Close === 'function') {
+            window.OneTrust.Close();
+            closed++;
+        }
+    } catch (e) {}
+    const overlays = [
+        '#onetrust-pc-sdk', '.onetrust-pc-dark-filter', '.ot-pc-dark-filter',
+        '#onetrust-banner-sdk', '#onetrust-consent-sdk .onetrust-pc-dark-filter',
+        '.ot-fade-in.onetrust-pc-dark-filter',
+        '#truste-consent-track', '#cookie-consent-overlay',
+        '[id*="cookie"][class*="overlay"]', '[class*="cmp-overlay"]',
+    ];
+    for (const sel of overlays) {
+        try {
+            document.querySelectorAll(sel).forEach(n => {
+                const st = window.getComputedStyle(n);
+                if (st && st.display !== 'none' && st.visibility !== 'hidden') {
+                    n.style.setProperty('display', 'none', 'important');
+                    closed++;
+                }
+            });
+        } catch (e) {}
+    }
+    return closed;
+})()
+"""
+
+
 # Instrument the page's tracking APIs so click-tracking is detected even when
 # the network beacon is deferred to the NEXT page view (Adobe ActivityMap),
 # batched by a TMS, or suppressed by consent state. Sites like Fresenius track
@@ -1616,10 +1879,75 @@ INSTRUMENT_TRACKING_JS = r"""
         } catch(e) {}
     };
 
-    const wrapAll = () => { wrapS(); wrapU(); wrapG(); wrapDL(); };
+    // Adobe Client Data Layer (adobeDataLayer) — the event bus AEM Core
+    // Components / EMU sites push `cmp:click` and custom events into. It is
+    // NOT window.dataLayer, so the GTM wrap above never saw it. On AEM sites
+    // this is often the only click signal that fires at click time.
+    const wrapACDL = () => {
+        try {
+            const adl = window.adobeDataLayer;
+            if (adl && typeof adl.push === 'function' && !adl.__qaWrapped) {
+                const orig = adl.push.bind(adl);
+                adl.__qaWrapped = true;
+                adl.push = function() {
+                    try {
+                        for (const a of arguments) {
+                            if (a && typeof a === 'object' && !Array.isArray(a)) {
+                                if (a.event || a['xdm:eventType']) push('adobeDataLayer', safeJson(a));
+                            }
+                        }
+                    } catch(e) {}
+                    return orig.apply(null, arguments);
+                };
+            }
+        } catch(e) {}
+    };
+
+    // CLICK WITNESS — records what the browser actually delivered the click
+    // to. Coordinate-based CDP clicks can land on an overlay / sticky header
+    // instead of the intended node; without this the audit would happily
+    // report another element's beacons under this element's row. Capture
+    // phase + composedPath so shadow-DOM targets are seen too.
+    try {
+        if (!window.__qaWitnessInstalled) {
+            window.__qaWitnessInstalled = true;
+            window.__qaLastClick = null;
+            document.addEventListener('click', (e) => {
+                try {
+                    const path = (e.composedPath && e.composedPath()) || [];
+                    const uids = [];
+                    for (const n of path) {
+                        if (n && n.getAttribute) {
+                            const u = n.getAttribute('data-tvuid');
+                            if (u) uids.push(u);
+                        }
+                    }
+                    const t = e.target;
+                    window.__qaLastClick = {
+                        uids: uids,
+                        tag: (t && t.tagName) || '',
+                        text: ((t && (t.innerText || t.textContent)) || '').replace(/\s+/g, ' ').trim().slice(0, 60),
+                        ts: Date.now()
+                    };
+                } catch(err) {}
+            }, true);
+        }
+    } catch(e) {}
+
+    const wrapAll = () => { wrapS(); wrapU(); wrapG(); wrapDL(); wrapACDL(); };
     wrapAll();
     window.__qaTrackTimer = setInterval(wrapAll, 2000);
     return true;
+})()
+"""
+
+# Read + clear the click witness. Returns what the last real click actually
+# hit, so the audit can prove the intended element received the event.
+READ_CLEAR_WITNESS_JS = r"""
+(() => {
+    const w = window.__qaLastClick || null;
+    window.__qaLastClick = null;
+    return w;
 })()
 """
 
@@ -1630,6 +1958,24 @@ HARVEST_TRACKING_JS = r"""
     return c;
 })()
 """
+
+# Look at what the click pushed WITHOUT consuming it. Used right after a click
+# to decide whether a network beacon is still coming (and therefore whether to
+# keep the capture window open) before the real harvest runs.
+PEEK_TRACKING_JS = r"""
+(() => (window.__qaTrackCaptures || []).slice())()
+"""
+
+# How long a click's capture window stays open.
+#   IDLE  — nothing fired at the API level; close fast, most elements are untracked.
+#   MAX   — the API said an event fired, so a network beacon is on its way.
+#           Tag managers commonly defer /g/collect by 5s+, and a window that
+#           closes earlier pushes the beacon into the NEXT element's results.
+CLICK_IDLE_WAIT = 1.8
+CLICK_BEACON_MAX_WAIT = 8.0
+# Drain at the very end of the page so the last elements' deferred beacons
+# still land before reconciliation runs.
+FINAL_DRAIN_WAIT = 9.0
 
 # Read AND clear Adobe ActivityMap's s_sq cookie. ActivityMap records the
 # clicked link into s_sq at click time and only transmits it with the NEXT
@@ -1656,6 +2002,202 @@ READ_CLEAR_SSQ_JS = r"""
     return val;
 })()
 """
+
+
+# ===== CLICK ATTRIBUTION SUPPORT =====
+# Page-level events that fire on a timer, on scroll, or on tag-manager
+# bootstrap. They are NOT caused by the element under test, but they land in
+# whatever capture window happens to be open — which is how a scroll event
+# ends up printed under some innocent button. Filtered out of click results.
+NOISE_EVENTS = {
+    'scroll', 'spa_scroll', 'gtm.scrolldepth', 'user_engagement', 'page_view',
+    'session_start', 'first_visit', 'gtm.js', 'gtm.dom', 'gtm.load', 'gtm.init',
+    'gtm.triggergroup', 'gtm.historychange', 'gtm.timer', 'onetrustloaded',
+    'optanonloaded', 'onetrustgroupsupdated', 'optanonconsentupdated',
+    'gtm.scrollDepth'.lower(), 'spa_pageview', 'virtual_page_view',
+    'cmp:show', 'cmp:loaded', 'consent_update',
+}
+
+
+def _is_noise_event(name):
+    return str(name or '').strip().lower() in NOISE_EVENTS
+
+
+# Parameter keys whose value identifies WHICH element a beacon belongs to.
+# Every GA4 click beacon carries the clicked link's own url/text, so a beacon
+# can be bound to its true element by content instead of by arrival time —
+# which is what makes attribution correct even when a tag manager defers the
+# beacon by several seconds into a later element's window.
+_LINK_URL_KEYS = ('ep.link_url', 'ep.file_name', 'ep.outbound_url', 'link_url',
+                  'gtm.elementurl', 'linkhref', 'ep.page_location')
+_LINK_TEXT_KEYS = ('ep.link_text', 'ep.download_file_name', 'ep.file_name',
+                   'link_text', 'gtm.elementtext', 'linktext')
+
+
+def beacon_identity(ev):
+    """Extract (link_url, link_text) that identify the element a tracking
+    event describes. Works on our parsed GA4 event dicts and on raw
+    dataLayer payloads. Returns ('','') when the event carries no element
+    identity (e.g. a bare `click` outbound hit)."""
+    if not isinstance(ev, dict):
+        return '', ''
+    params = ev.get('params') if isinstance(ev.get('params'), dict) else {}
+    merged = {}
+    for src in (params, ev):
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if isinstance(v, (str, int, float)):
+                    merged[str(k).lower()] = str(v)
+    url = ''
+    for k in _LINK_URL_KEYS:
+        if merged.get(k):
+            url = merged[k]
+            break
+    txt = ''
+    for k in _LINK_TEXT_KEYS:
+        if merged.get(k):
+            txt = merged[k]
+            break
+    return url.strip(), txt.strip()
+
+
+def _attr_key_url(u):
+    """Normalise a url for element<->beacon matching. Keeps the fragment,
+    because anchor links (#isi) are distinct QA targets, but drops scheme,
+    www and trailing slash so relative/absolute forms unify."""
+    s = str(u or '').strip().lower()
+    if not s:
+        return ''
+    frag = ''
+    if '#' in s:
+        s, frag = s.split('#', 1)
+        frag = '#' + frag
+    s = re.sub(r'^https?://', '', s)
+    s = re.sub(r'^www\.', '', s)
+    s = s.split('?')[0].rstrip('/')
+    return s + frag
+
+
+def _url_keys(u, base=""):
+    """All the normalised forms a url might be written as, for matching.
+
+    A beacon reports the link exactly as the markup wrote it — "#isi",
+    "/science", "//cdn/x" — while discovery stored the browser-resolved
+    absolute href. Comparing one form against the other silently fails, which
+    leaves a genuinely tracked element looking untracked and lets its beacon
+    drift onto a neighbour. Emitting both the absolute key and the
+    path+fragment key lets either form match.
+    """
+    s = str(u or '').strip()
+    if not s:
+        return set()
+    keys = set()
+    abs_form = s
+    if base:
+        try:
+            from urllib.parse import urljoin
+            abs_form = urljoin(base, s)
+        except Exception:
+            abs_form = s
+    for form in (s, abs_form):
+        k = _attr_key_url(form)
+        if k:
+            keys.add(k)
+            # host-less form: "host.com/path#frag" -> "/path#frag"
+            m = re.match(r'^[^/#?]+\.[^/#?]+(/.*|#.*)?$', k)
+            if m:
+                tail = m.group(1) or '/'
+                keys.add(tail if tail.startswith(('/', '#')) else '/' + tail)
+            elif k.startswith(('/', '#')):
+                keys.add(k)
+    return {k for k in keys if k and k not in ('/', '')}
+
+
+def _attr_key_text(t):
+    return re.sub(r'\s+', ' ', str(t or '')).strip().lower()
+
+
+_ZONE_KEYS = ('ep.link_location', 'link_location', 'ep.file_location',
+              'file_location', 'linklocation', 'downloadlocation')
+
+
+def beacon_zone(ev):
+    """The page region a beacon says the click happened in ('header' /
+    'footer' / ''). Sites that tag link_location give us a free tie-breaker
+    between the same link duplicated in the header and the footer — without
+    it, one twin absorbs the other's events."""
+    if not isinstance(ev, dict):
+        return ''
+    params = ev.get('params') if isinstance(ev.get('params'), dict) else {}
+    for src in (params, ev):
+        if not isinstance(src, dict):
+            continue
+        for k, v in src.items():
+            if str(k).lower() in _ZONE_KEYS and isinstance(v, str) and v.strip():
+                z = v.strip().lower()
+                if 'header' in z or 'nav' in z:
+                    return 'header'
+                if 'footer' in z:
+                    return 'footer'
+                if 'body' in z or 'main' in z or 'content' in z:
+                    return 'body'
+    return ''
+
+
+# Params that change on every hit and say nothing about the event itself.
+# Excluded when deciding whether two hits are "the same event".
+_VOLATILE_PARAMS = {'hit_timestamp', 'ep.hit_timestamp', '_et', 'et',
+                    'client_id_config', 'ep.client_id_config', '_p', 'seg',
+                    '_s', 'sid', 'sct', 'ep.page_url', 'page_url'}
+
+
+def consolidate_ga4_events(events):
+    """Collapse hits that are the same event sent to several GA4 properties.
+
+    Sites commonly dual-tag: one click fires `exit_link` to two measurement
+    IDs, so a raw list reads "exit_link, exit_link, exit_link" and looks like
+    a bug. Group by event name + meaningful params, and report the property
+    IDs together, so each row shows what actually happened once.
+    """
+    grouped = []
+    index = {}
+    for ev in events or []:
+        if not isinstance(ev, dict):
+            continue
+        name = str(ev.get("event") or "")
+        params = ev.get("params") if isinstance(ev.get("params"), dict) else {}
+        sig_items = tuple(sorted(
+            (str(k), str(v)) for k, v in params.items()
+            if str(k).lower() not in _VOLATILE_PARAMS
+        ))
+        mid = str(ev.get("measurement_id") or "")
+        # API-level captures (dataLayer/ACDL/gtag) are a different kind of
+        # evidence than a network beacon — never merge the two together.
+        is_api = mid.startswith("(")
+        key = (name, sig_items, is_api)
+        if key in index:
+            slot = grouped[index[key]]
+            if mid and mid not in slot["_ids"]:
+                slot["_ids"].append(mid)
+            slot["hit_count"] += 1
+            continue
+        index[key] = len(grouped)
+        grouped.append({
+            "event": name,
+            "_ids": [mid] if mid else [],
+            "params": dict(params),
+            "hit_count": 1,
+        })
+
+    out = []
+    for g in grouped:
+        ids = g.pop("_ids")
+        g["measurement_ids"] = ids
+        # Keep `measurement_id` a plain string so existing report/Excel
+        # rendering keeps working unchanged.
+        g["measurement_id"] = " + ".join(ids) if ids else ""
+        out.append(g)
+    return out
 
 
 def _norm_url(u):
@@ -1779,6 +2321,12 @@ async def validate_clicks(browser, url, index, total):
         all_requests = []
         seen_req_keys = set()
 
+        # Which element's click window is open right now. Every captured
+        # request is stamped with it, so attribution is an explicit label
+        # rather than an array slice that a late beacon can slide out of.
+        # -1 means "no click in progress" (page load, menu expansion, idle).
+        current_cid = {"v": -1}
+
         def _push_req(req_url, post, ts):
             if not req_url:
                 return
@@ -1786,7 +2334,8 @@ async def validate_clicks(browser, url, index, total):
             if key in seen_req_keys:
                 return
             seen_req_keys.add(key)
-            all_requests.append({"url": req_url, "post": post or "", "ts": ts})
+            all_requests.append({"url": req_url, "post": post or "", "ts": ts,
+                                 "cid": current_cid["v"]})
 
         def on_req_persistent(params):
             try:
@@ -1884,8 +2433,16 @@ async def validate_clicks(browser, url, index, total):
                 # Zone + frame are part of identity: the same link in header
                 # AND footer (or inside an iframe) is a separate QA case.
                 key += "|Z:" + (el.get("zone") or "body") + "|F:" + (el.get("frame_url") or "")
+                el["fp"] = key          # stable fingerprint, survives re-stamping
                 if key not in elements_by_key:
                     elements_by_key[key] = el
+                else:
+                    # Keep the richest record: a later pass may see the element
+                    # while it is visible (real uid + accurate zone) where the
+                    # first pass caught it collapsed.
+                    prev = elements_by_key[key]
+                    if not prev.get("uid") and el.get("uid"):
+                        prev["uid"] = el["uid"]
 
         # Pass A: initial discovery (default page state, no special hovers).
         try: _add_batch(await page.evaluate(DISCOVER_CLICKABLES_JS))
@@ -1997,6 +2554,28 @@ async def validate_clicks(browser, url, index, total):
                     el = page.locator(sel).nth(i)
                     if not await el.is_visible(timeout=300):
                         continue
+                    # Never open the cookie/consent UI while hunting for
+                    # menus: "Cookies Settings" matches these opener
+                    # selectors, and the preference center it opens covers
+                    # the header for the rest of the audit.
+                    try:
+                        if await el.evaluate("""e => {
+                            let n = e;
+                            while (n && n !== document.body) {
+                                const id = (n.id || '').toLowerCase();
+                                const cls = (typeof n.className === 'string' ? n.className : '').toLowerCase();
+                                if (/cookie|consent|onetrust|optanon|^ot-|privacy|truste/.test(id)
+                                    || /cookie|consent|onetrust|optanon|ot-pc|ot-sdk|privacy|truste/.test(cls)) {
+                                    return true;
+                                }
+                                n = n.parentElement;
+                            }
+                            const t = (e.innerText || e.getAttribute('aria-label') || '').toLowerCase();
+                            return /cookie|consent|privacy choices|manage choices/.test(t);
+                        }"""):
+                            continue
+                    except Exception:
+                        pass
                     await el.click(force=True, timeout=900, no_wait_after=True)
                     await asyncio.sleep(0.55)   # let overlay/menu render
                     opened_count += 1
@@ -2111,6 +2690,16 @@ async def validate_clicks(browser, url, index, total):
         except Exception:
             pass
 
+        # Discovery may have left a consent dialog open on top of the page.
+        try:
+            _cc = await page.evaluate(CLOSE_CONSENT_UI_JS)
+            if _cc:
+                sys.stdout.write(f"[{index}/{total}] Dismissed {_cc} consent overlay(s) left open by discovery\n")
+                sys.stdout.flush()
+                await asyncio.sleep(0.4)
+        except Exception:
+            pass
+
         elements = list(elements_by_key.values())
 
         # Order: header first, then footer, then body.
@@ -2174,6 +2763,29 @@ async def validate_clicks(browser, url, index, total):
                 await page.evaluate(HARVEST_TRACKING_JS)
             except Exception:
                 pass
+            # A reload also wipes the data-tvuid stamps, which are how the
+            # click loop guarantees it clicks the intended node. Re-run
+            # discovery to re-stamp, then re-point each pending element at
+            # its NEW uid via the fingerprint (which is reload-stable).
+            try:
+                fresh = await page.evaluate(DISCOVER_CLICKABLES_JS)
+                fp_to_uid = {}
+                for f in fresh or []:
+                    t = re.sub(r'\s+', ' ', (f.get("text") or "").strip().lower())
+                    h = (f.get("href") or "").strip().lower()
+                    if t:
+                        k = "T:" + t + "|H:" + h
+                    else:
+                        k = (f.get("tag", "") + "|H:" + h + "|I:" + (f.get("id") or ""))
+                    k += "|Z:" + (f.get("zone") or "body") + "|F:" + (f.get("frame_url") or "")
+                    if f.get("uid"):
+                        fp_to_uid[k] = f["uid"]
+                for pending in elements:
+                    nu = fp_to_uid.get(pending.get("fp"))
+                    if nu:
+                        pending["uid"] = nu
+            except Exception:
+                pass
             return True
 
         # Request capture listeners were attached before navigation (see top of
@@ -2194,16 +2806,24 @@ async def validate_clicks(browser, url, index, total):
                     "id": elem.get("id", ""),
                     "zone": elem.get("zone", "body"),
                     "frame_url": elem.get("frame_url", ""),
+                    "uid": elem.get("uid", ""),
+                    "is_download": bool(elem.get("is_download")),
                 },
                 "ga4_events": [],
                 "adobe_calls": [],
                 "adobe_websdk": [],
                 "other_analytics": [],
+                "datalayer_events": [],   # instant, click-time ground truth
                 "network_requests": [],   # RAW capture: every request in this click's window
                 "network_count": 0,
                 "has_tracking": False,
                 "skipped": False,
+                "skip_reason": "",
                 "click_method": "",
+                "click_verified": False,  # witness confirmed the intended node was hit
+                "blocked_by": "",         # element covering this one, if any
+                "click_method_note": "",
+                "attribution": "",        # how the events were bound: witness/content/window
                 "total_requests": 0
             })
 
@@ -2233,7 +2853,10 @@ async def validate_clicks(browser, url, index, total):
                 ):
                     ga4_list = parse_ga4_event(req["url"], req["post"])
                     for ev in ga4_list:
-                        if ev.get("event") and ev["event"] != "page_view":
+                        # Drop page-level noise (scroll depth, engagement pings,
+                        # page_view). These fire on timers and would otherwise be
+                        # printed under whichever button happened to be under test.
+                        if ev.get("event") and not _is_noise_event(ev["event"]):
                             el_res["ga4_events"].append(ev)
                             el_res["has_tracking"] = True
                             el_res["total_requests"] += 1
@@ -2308,13 +2931,28 @@ async def validate_clicks(browser, url, index, total):
                 except Exception:
                     pass
 
-            # PRIMARY: the discovery selector.
-            try:
-                cand = target.locator(elem["selector"]).first
-                if await cand.count() > 0:
-                    el = cand
-            except Exception:
-                pass
+            # PRIMARY: the uid stamped onto the node at discovery time. This
+            # is a 1:1 handle — no ambiguity, no .first picking a different
+            # node, and header/footer twins that share text+href stay
+            # distinct. Everything below is fallback for when a reload wiped
+            # the stamps before re-stamping could run.
+            uid = elem.get("uid") or ""
+            if uid:
+                try:
+                    cand = target.locator(f'[data-tvuid="{uid}"]')
+                    if await cand.count() > 0:
+                        el = cand.first
+                except Exception:
+                    pass
+
+            # FALLBACK 0: the discovery selector.
+            if el is None:
+                try:
+                    cand = target.locator(elem["selector"]).first
+                    if await cand.count() > 0:
+                        el = cand
+                except Exception:
+                    pass
             # FALLBACK 1: locate by href — selectors can go stale, but the
             # href is stable. NOTE: el.href (what discovery stored) is the
             # ABSOLUTE url while the DOM attribute is often RELATIVE, and
@@ -2349,9 +2987,6 @@ async def validate_clicks(browser, url, index, total):
                             el = cand
                     except Exception:
                         pass
-
-            # Bookmark: note how many requests exist BEFORE clicking
-            req_bookmark = len(all_requests)
 
             if el is not None:
                 # Check if element is visible — after navigating back,
@@ -2425,47 +3060,129 @@ async def validate_clicks(browser, url, index, total):
                     await el.scroll_into_view_if_needed(timeout=1500)
                 except Exception:
                     pass
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.35)
 
-                # PRIMARY METHOD: CDP Input.dispatchMouseEvent
-                # This sends a REAL mouse event through the browser's input
-                # pipeline — generating isTrusted:true events. Adobe
-                # AppMeasurement / Activity Map ONLY fires s.tl() on trusted
-                # click events. Playwright's force:true and JS dispatches
-                # create untrusted events which Adobe ignores.
+                # ---- DRAIN before the click ----
+                # Everything above (menu re-expansion, parent hovers, JS
+                # .click() on collapsed parents, scrolling) fires the site's
+                # OWN tracking. Previously the capture window opened before
+                # all that, so a parent menu item's beacons were reported
+                # under its child. Open the window only now, and throw away
+                # anything the expansion produced.
                 try:
-                    box = await el.bounding_box()
-                    if box:
-                        cx = box['x'] + box['width'] / 2
-                        cy = box['y'] + box['height'] / 2
-                        await cdp.send("Input.dispatchMouseEvent", {
-                            "type": "mousePressed",
-                            "x": cx, "y": cy,
-                            "button": "left",
-                            "clickCount": 1
-                        })
-                        await asyncio.sleep(0.05)
-                        await cdp.send("Input.dispatchMouseEvent", {
-                            "type": "mouseReleased",
-                            "x": cx, "y": cy,
-                            "button": "left",
-                            "clickCount": 1
-                        })
-                        clicked = True
-                        click_method = "cdp-click"
+                    await page.evaluate(HARVEST_TRACKING_JS)     # discard
+                    await page.evaluate(READ_CLEAR_WITNESS_JS)   # discard
+                    await page.evaluate(READ_CLEAR_SSQ_JS)       # discard
                 except Exception:
                     pass
+                await asyncio.sleep(0.15)
+                req_bookmark = len(all_requests)
+                current_cid["v"] = ei
 
-                # Fallback: Playwright click (for elements where bounding box fails)
-                if not clicked:
+                # Resolve a click point that actually HITS this element.
+                # A centre-point CDP click is the highest-fidelity input
+                # (isTrusted:true, which Adobe ActivityMap and some GTM
+                # triggers require) but it is coordinate-based: a sticky
+                # header, cookie bar or overlay sitting on top means the
+                # click lands on a DIFFERENT element while the audit records
+                # it as a success. Hit-test first, and only take the trusted
+                # path when the topmost node at that point really is ours.
+                hit = None
+                try:
+                    hit = await el.evaluate("""(e) => {
+                        const r = e.getBoundingClientRect();
+                        if (!r.width || !r.height) return {ok: false, reason: 'no-box'};
+                        const cands = [
+                            [r.x + r.width / 2,   r.y + r.height / 2],
+                            [r.x + r.width * 0.25, r.y + r.height / 2],
+                            [r.x + r.width * 0.75, r.y + r.height / 2],
+                            [r.x + Math.min(6, r.width / 2), r.y + Math.min(6, r.height / 2)],
+                        ];
+                        for (const [x, y] of cands) {
+                            if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
+                            const top = document.elementFromPoint(x, y);
+                            if (top && (top === e || e.contains(top) || top.contains(e))) {
+                                return {ok: true, x: x, y: y};
+                            }
+                        }
+                        return {ok: false, reason: 'obscured'};
+                    }""")
+                except Exception:
+                    hit = None
+
+                # If something is covering the element, try to clear it before
+                # falling back. A previous element in this very loop is the
+                # usual culprit: clicking a "More from ..." style toggle
+                # leaves its panel open on top of the links that come next.
+                if not (hit and hit.get("ok")):
                     try:
-                        await el.click(force=True, timeout=2500, no_wait_after=True)
-                        clicked = True
-                        click_method = "force-click"
+                        await page.evaluate(CLOSE_CONSENT_UI_JS)
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(0.25)
+                        await el.scroll_into_view_if_needed(timeout=1200)
+                        await asyncio.sleep(0.2)
+                        hit = await el.evaluate("""(e) => {
+                            const r = e.getBoundingClientRect();
+                            if (!r.width || !r.height) return {ok: false, reason: 'no-box'};
+                            const cands = [
+                                [r.x + r.width / 2,   r.y + r.height / 2],
+                                [r.x + r.width * 0.25, r.y + r.height / 2],
+                                [r.x + r.width * 0.75, r.y + r.height / 2],
+                            ];
+                            let blocker = '';
+                            for (const [x, y] of cands) {
+                                if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
+                                const top = document.elementFromPoint(x, y);
+                                if (top && (top === e || e.contains(top) || top.contains(e))) {
+                                    return {ok: true, x: x, y: y};
+                                }
+                                if (top && !blocker) {
+                                    blocker = top.tagName + (top.id ? '#' + top.id : '')
+                                            + '.' + String(top.className || '').slice(0, 50);
+                                }
+                            }
+                            return {ok: false, reason: 'obscured', blocker: blocker};
+                        }""")
+                    except Exception:
+                        pass
+                    if hit and not hit.get("ok") and hit.get("blocker"):
+                        el_res["blocked_by"] = hit["blocker"]
+
+                # Still covered: neutralise the covering elements so the
+                # trusted click can be delivered to the real target.
+                pierced = False
+                if not (hit and hit.get("ok")):
+                    try:
+                        hit = await el.evaluate(PIERCE_OVERLAY_JS)
+                        pierced = True
+                        if hit and hit.get("ok") and hit.get("pierced"):
+                            el_res["click_method_note"] = f"pierced {hit['pierced']} overlay(s)"
                     except Exception:
                         pass
 
-                # Last resort: JS click
+                if hit and hit.get("ok"):
+                    try:
+                        await cdp.send("Input.dispatchMouseEvent", {
+                            "type": "mouseMoved", "x": hit["x"], "y": hit["y"]})
+                        await cdp.send("Input.dispatchMouseEvent", {
+                            "type": "mousePressed", "x": hit["x"], "y": hit["y"],
+                            "button": "left", "clickCount": 1})
+                        await asyncio.sleep(0.05)
+                        await cdp.send("Input.dispatchMouseEvent", {
+                            "type": "mouseReleased", "x": hit["x"], "y": hit["y"],
+                            "button": "left", "clickCount": 1})
+                        clicked = True
+                        click_method = "cdp-click"
+                    except Exception:
+                        pass
+
+                # STILL obscured. Playwright's force-click is NOT a safe
+                # fallback here: force only skips actionability checks, it
+                # still dispatches at the element's coordinates, so it lands
+                # on whatever is covering the element — producing a confident
+                # "clicked" with another element's beacons, or none at all.
+                # Dispatch on the node itself instead: untrusted, but it is
+                # guaranteed to reach the element under test.
                 if not clicked:
                     try:
                         await el.evaluate("e => e.click()")
@@ -2474,16 +3191,116 @@ async def validate_clicks(browser, url, index, total):
                     except Exception:
                         pass
 
+                # Only now try a coordinate click, as a last resort for nodes
+                # where .click() is a no-op (e.g. label/summary handling).
+                if not clicked:
+                    try:
+                        await el.click(force=True, timeout=2500, no_wait_after=True)
+                        clicked = True
+                        click_method = "force-click"
+                    except Exception:
+                        pass
+
+                # Put any neutralised overlays back before anything else runs.
+                if pierced:
+                    try:
+                        await page.evaluate(RESTORE_OVERLAY_JS)
+                    except Exception:
+                        pass
+
+                # ---- VERIFY the intended node actually received the click ----
+                if clicked:
+                    await asyncio.sleep(0.25)
+                    witness = None
+                    try:
+                        witness = await page.evaluate(READ_CLEAR_WITNESS_JS)
+                    except Exception:
+                        witness = None
+                    w_uids = (witness or {}).get("uids") or []
+                    if uid and w_uids:
+                        if uid in w_uids:
+                            el_res["click_verified"] = True
+                        else:
+                            # A different element swallowed the click. Retry by
+                            # dispatching directly on our node rather than
+                            # recording the other element's beacons here.
+                            # JS dispatch, not a coordinate click — the whole
+                            # reason we got here is that coordinates resolve
+                            # to somebody else.
+                            try:
+                                await el.evaluate("e => e.click()")
+                                click_method += "+retarget-js"
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.25)
+                            try:
+                                w2 = await page.evaluate(READ_CLEAR_WITNESS_JS)
+                                if uid in ((w2 or {}).get("uids") or []):
+                                    el_res["click_verified"] = True
+                            except Exception:
+                                pass
+                    elif uid and not w_uids:
+                        # No witness at all (handler stopped propagation before
+                        # our capture listener, or click never landed).
+                        el_res["click_verified"] = False
+
             if clicked:
-                await asyncio.sleep(3.0)   # let s.tl() / click events fire
+                # ---- ADAPTIVE WAIT ----
+                # Fixed 3s was the single biggest source of wrong data on this
+                # stack: GTM defers /g/collect by ~5s, so every tracked click's
+                # beacon arrived AFTER the window closed and got recorded under
+                # the NEXT element. Read the instant API-level signal first —
+                # dataLayer/ACDL push synchronously at click time — and only
+                # pay the long wait when we know a beacon is actually coming.
+                await asyncio.sleep(0.6)
+                try:
+                    early_caps = await page.evaluate(PEEK_TRACKING_JS)
+                except Exception:
+                    early_caps = []
+                expect_beacon = any(
+                    not _is_noise_event((c.get("detail") or {}).get("event")
+                                        if isinstance(c.get("detail"), dict) else "")
+                    for c in (early_caps or [])
+                ) or bool(elem.get("is_download"))
+
+                if os.environ.get("TV_DEBUG"):
+                    try:
+                        _dbg = await page.evaluate("""()=>({dl:!!(window.dataLayer&&window.dataLayer.__qaWrapped),
+                            inst:!!window.__qaTrackInstalled, caps:(window.__qaTrackCaptures||[]).length,
+                            dllen:Array.isArray(window.dataLayer)?window.dataLayer.length:-1,
+                            url:location.href.slice(0,60)})""")
+                    except Exception as _e:
+                        _dbg = {"err": str(_e)[:60]}
+                    sys.stdout.write("      DBG ei=%s reqs=%s bm=%s caps=%s %s\n" % (
+                        ei, len(all_requests), req_bookmark, len(early_caps or []), _dbg))
+                    sys.stdout.flush()
+                deadline = time.time() + (CLICK_BEACON_MAX_WAIT if expect_beacon
+                                          else CLICK_IDLE_WAIT)
+                quiet_needed = 1.2 if expect_beacon else 0.6
+                last_seen = len(all_requests)
+                last_change = time.time()
+                while time.time() < deadline:
+                    await asyncio.sleep(0.25)
+                    if len(all_requests) != last_seen:
+                        last_seen = len(all_requests)
+                        last_change = time.time()
+                    elif time.time() - last_change >= quiet_needed:
+                        break
 
             label = elem.get("text", "")[:30] or elem.get("selector", "")[:30]
             if not clicked:
+                current_cid["v"] = -1     # never leave a window open on a skip
                 el_res["skipped"] = True
+                el_res["skip_reason"] = "not-found" if el is None else "unclickable"
                 sys.stdout.write(
-                    f"[{index}/{total}]   [{ei+1}/{len(elements)}] [{elem.get('zone', 'body').upper()[:6]}] \"{label}\" -> [SKIPPED]\n")
+                    f"[{index}/{total}]   [{ei+1}/{len(elements)}] [{elem.get('zone', 'body').upper()[:6]}] "
+                    f"\"{label}\" -> [SKIPPED: {el_res['skip_reason']}]\n")
                 sys.stdout.flush()
                 continue
+
+            # Close this element's window before parsing so nothing that
+            # arrives during the (async) parse gets stamped with this cid.
+            current_cid["v"] = -1
 
             # Capture: grab all NEW requests since the bookmark
             click_requests = all_requests[req_bookmark:]
@@ -2494,6 +3311,7 @@ async def validate_clicks(browser, url, index, total):
             ]
             el_res["network_count"] = len(click_requests)
             el_res["click_method"] = click_method
+            el_res["attribution"] = "window"
             _parse_click_requests(click_requests, el_res)
 
             # Harvest API-LEVEL tracking fired by this click — catches Adobe
@@ -2524,12 +3342,22 @@ async def validate_clicks(browser, url, index, total):
                         "params": (det.get("params") or {}) if isinstance(det, dict) else {},
                     })
                     el_res["has_tracking"] = True
-                elif ctype == "dataLayer" and isinstance(det, dict):
+                elif ctype in ("dataLayer", "adobeDataLayer") and isinstance(det, dict):
+                    ev_name = str(det.get("event") or det.get("xdm:eventType") or "")
+                    # Scroll-depth / GTM bootstrap / consent events fire on
+                    # timers, not on this click. Recording them here is what
+                    # made unrelated buttons look "tracked".
+                    if _is_noise_event(ev_name):
+                        continue
                     params = {k: v for k, v in det.items()
                               if k != "event" and isinstance(v, (str, int, float, bool))}
+                    src = "(dataLayer)" if ctype == "dataLayer" else "(adobeDataLayer)"
+                    el_res["datalayer_events"].append({
+                        "event": ev_name, "source": src, "params": params,
+                    })
                     el_res["ga4_events"].append({
-                        "event": str(det.get("event") or ""),
-                        "measurement_id": "(dataLayer)",
+                        "event": ev_name,
+                        "measurement_id": src,
                         "params": params,
                     })
                     el_res["has_tracking"] = True
@@ -2565,9 +3393,23 @@ async def validate_clicks(browser, url, index, total):
             oa_str = ", ".join(sorted({o["vendor"] for o in el_res["other_analytics"]})) if el_res["other_analytics"] else ""
             zone_tag = elem.get("zone", "body").upper()[:6]
             extra = f" Other:[{oa_str}]" if oa_str else ""
+            vtag = "" if el_res.get("click_verified") else " [UNVERIFIED]"
             sys.stdout.write(
-                f"[{index}/{total}]   [{ei+1}/{len(elements)}] [{zone_tag}] \"{label}\" -> [{click_method}] GA4:[{ga_str}] Adobe:[{aa_str}]{extra}\n")
+                f"[{index}/{total}]   [{ei+1}/{len(elements)}] [{zone_tag}] \"{label}\" -> [{click_method}]{vtag} "
+                f"GA4:[{ga_str}] Adobe:[{aa_str}]{extra}\n")
             sys.stdout.flush()
+
+            # Leave the page in a neutral state for the next element. Toggles,
+            # accordions and "expand" panels stay open after being clicked and
+            # will physically cover the elements that come after them, which
+            # shows up as a run of unverified clicks with no tracking. Escape
+            # closes most overlays; anything this reopens is discarded by the
+            # drain at the start of the next element.
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.15)
+            except Exception:
+                pass
 
             # Close any popup tabs the click opened (target=_blank links).
             # Their requests were already captured by the context-level
@@ -2586,6 +3428,190 @@ async def validate_clicks(browser, url, index, total):
                 await _ensure_on_page()
             except Exception:
                 pass
+
+        # ---- FINAL DRAIN ----
+        # The last elements clicked may still have beacons in flight. Without
+        # this they'd simply never be captured.
+        if elements_result:
+            current_cid["v"] = -1
+            await asyncio.sleep(FINAL_DRAIN_WAIT)
+
+        # ================= CONTENT-BASED RECONCILIATION =================
+        # Timing alone cannot attribute a beacon that a tag manager defers by
+        # several seconds — by the time it lands, a later element's window is
+        # open, which is exactly how "button 1's parameters" end up displayed
+        # under button 2. But every click beacon carries the clicked link's
+        # OWN identity (ep.link_url / ep.link_text / gtm.elementUrl), so the
+        # beacon can be bound to its true element by content instead.
+        #
+        # Pass 1: index every audited element by url and by text.
+        # Pass 2: re-read every analytics request, work out which element it
+        #         describes, and move it there — overriding the time-window
+        #         guess whenever the payload names an element unambiguously.
+        try:
+            by_url = {}
+            by_text = {}
+            for i, r in enumerate(elements_result):
+                if r.get("skipped"):
+                    continue
+                for uk in _url_keys(r["element"].get("href"), original_url):
+                    by_url.setdefault(uk, []).append(i)
+                tk = _attr_key_text(r["element"].get("text"))
+                if tk:
+                    by_text.setdefault(tk, []).append(i)
+
+            def _pick(cands, fallback_cid, zone):
+                """Narrow a candidate list down to one element."""
+                if not cands:
+                    return None
+                if len(cands) == 1:
+                    return cands[0]
+                # The beacon often names the region it fired in; prefer the
+                # candidate sitting in that region. This is what keeps a
+                # header logo and a footer logo — identical href, identical
+                # text — from absorbing each other's events.
+                if zone:
+                    zoned = [i for i in cands
+                             if elements_result[i]["element"].get("zone") == zone]
+                    if len(zoned) == 1:
+                        return zoned[0]
+                    if zoned:
+                        return fallback_cid if fallback_cid in zoned else zoned[0]
+                # Otherwise the click window that was open is the best tie-break.
+                return fallback_cid if fallback_cid in cands else cands[0]
+
+            def _resolve_owner(link_url, link_text, fallback_cid, zone=''):
+                """Which element does this beacon describe? Returns an index
+                into elements_result, or None to leave it where it is."""
+                tk = _attr_key_text(link_text)
+                u_hits = []
+                for uk in _url_keys(link_url, original_url):
+                    for i in by_url.get(uk, []):
+                        if i not in u_hits:
+                            u_hits.append(i)
+                t_hits = by_text.get(tk, []) if tk else []
+
+                # Strongest: url AND text agree.
+                both = [i for i in u_hits if i in t_hits]
+                if both:
+                    return _pick(both, fallback_cid, zone)
+                if u_hits:
+                    return _pick(u_hits, fallback_cid, zone)
+                if t_hits:
+                    return _pick(t_hits, fallback_cid, zone)
+                return None
+
+            # Wipe the network-derived events and rebuild them from scratch
+            # with correct ownership. API-level captures (dataLayer/ACDL/s.tl)
+            # are NOT touched: those are synchronous at click time and were
+            # already attributed correctly.
+            api_only = []
+            for r in elements_result:
+                keep_ga4 = [e for e in r["ga4_events"]
+                            if str(e.get("measurement_id", "")).startswith("(")]
+                api_only.append(keep_ga4)
+                r["ga4_events"] = []
+                r["adobe_calls"] = [c for c in r["adobe_calls"]
+                                    if str(c.get("link_type", "")).startswith("s.tl")
+                                    or c.get("link_type") == "ActivityMap"]
+                r["adobe_websdk"] = []
+                r["other_analytics"] = []
+                r["total_requests"] = 0
+
+            moved = 0
+            page_level_events = []
+            for req in all_requests:
+                req_low = req["url"].lower()
+                cid = req.get("cid", -1)
+                is_ga4 = ("/g/collect" in req_low or (
+                    ("google-analytics.com" in req_low or "analytics.google.com" in req_low)
+                    and "collect" in req_low))
+
+                if is_ga4:
+                    for ev in parse_ga4_event(req["url"], req["post"]):
+                        name = ev.get("event") or ""
+                        if not name or _is_noise_event(name):
+                            continue
+                        lu, lt = beacon_identity(ev)
+                        owner = _resolve_owner(lu, lt, cid, beacon_zone(ev))
+                        if owner is None:
+                            # No element identity in the payload. Such hits are
+                            # usually page-level (consent state, engagement,
+                            # visibility) and merely happened to land inside a
+                            # click's window — attributing them would print the
+                            # same phantom event under a dozen unrelated
+                            # buttons. Keep one only when the element's own
+                            # click-time dataLayer capture named that same
+                            # event, which proves the click caused it.
+                            if not (lu or lt) and 0 <= cid < len(elements_result):
+                                api_names = {
+                                    str(x.get("event") or "").lower()
+                                    for x in elements_result[cid].get("datalayer_events", [])
+                                }
+                                if name.lower() not in api_names:
+                                    page_level_events.append(name)
+                                    continue
+                            owner = cid if 0 <= cid < len(elements_result) else None
+                        if owner is None:
+                            continue
+                        if owner != cid:
+                            moved += 1
+                        tgt = elements_result[owner]
+                        tgt["ga4_events"].append(ev)
+                        tgt["has_tracking"] = True
+                        tgt["total_requests"] += 1
+                        if tgt["attribution"] != "content":
+                            tgt["attribution"] = "content"
+                    continue
+
+                # Non-GA4 vendors carry no element identity, so they stay with
+                # the click window they arrived in.
+                if 0 <= cid < len(elements_result):
+                    _parse_click_requests([req], elements_result[cid])
+
+            # Put the API-level GA4 events back.
+            for r, keep in zip(elements_result, api_only):
+                r["ga4_events"] = keep + r["ga4_events"]
+                if r["ga4_events"] or r["adobe_calls"]:
+                    r["has_tracking"] = True
+
+            # Collapse the same event sent to multiple GA4 properties.
+            for r in elements_result:
+                r["ga4_events"] = consolidate_ga4_events(r["ga4_events"])
+
+            # Recompute has_tracking honestly after the rebuild.
+            for r in elements_result:
+                r["has_tracking"] = bool(r["ga4_events"] or r["adobe_calls"]
+                                         or r["adobe_websdk"] or r["other_analytics"])
+
+            sys.stdout.write(f"[{index}/{total}] Reconciled beacons by payload identity "
+                             f"({moved} re-attributed to their true element)\n")
+            if page_level_events:
+                from collections import Counter as _C
+                _pl = ", ".join(f"{k}({v})" for k, v in _C(page_level_events).most_common(6))
+                sys.stdout.write(f"[{index}/{total}] Excluded page-level (non-click) events: {_pl}\n")
+            # The per-element lines above were printed BEFORE reconciliation,
+            # so reprint the final, corrected picture — that is what the
+            # report and the UI actually contain.
+            sys.stdout.write(f"[{index}/{total}] ---- FINAL (post-reconciliation) ----\n")
+            for _i, _r in enumerate(elements_result):
+                if _r.get("skipped"):
+                    continue
+                _names = []
+                for _e in _r["ga4_events"]:
+                    _n = _e.get("event") or ""
+                    _ids = _e.get("measurement_ids") or []
+                    _real = [x for x in _ids if not str(x).startswith("(")]
+                    _names.append(f"{_n}x{len(_real)}" if len(_real) > 1 else _n)
+                _lbl = (_r["element"].get("text") or "")[:30]
+                _zt = _r["element"].get("zone", "body").upper()[:6]
+                sys.stdout.write(
+                    f"[{index}/{total}]   [{_i+1}] [{_zt}] \"{_lbl}\" -> "
+                    f"{', '.join(_names) if _names else '(no tracking)'}\n")
+            sys.stdout.flush()
+        except Exception as _rec_err:
+            sys.stdout.write(f"[{index}/{total}] [WARN] reconciliation skipped: {str(_rec_err)[:120]}\n")
+            sys.stdout.flush()
 
         # DEBUG: dump unique hosts seen across the whole click loop
         try:
@@ -3161,7 +4187,12 @@ async def main():
                     "Element Selector": el.get("selector", ""),
                     "Zone": el.get("zone", ""),
                     "Frame": el.get("frame_url", ""),
+                    "Is Download": "Yes" if el.get("is_download") else "No",
                     "Click Status": "Skipped" if el_res.get("skipped") else (el_res.get("click_method") or "clicked"),
+                    "Click Verified": ("--" if el_res.get("skipped")
+                                       else ("Yes" if el_res.get("click_verified") else "No")),
+                    "Skip Reason": el_res.get("skip_reason", ""),
+                    "Blocked By": el_res.get("blocked_by", ""),
                     "Tracking Detected": "Yes" if el_res.get("has_tracking") else "No",
                     "GA4 Event 1 Name": ga4_1_name,
                     "GA4 Event 1 ID": ga4_1_id,

@@ -34,12 +34,27 @@ function colorizeLogLines(logs) {
 
 function formatSingleGa4Event(e) {
     if (!e) return '<span style="color:#64748b">--</span>';
-    const measId = e.measurement_id ? `<span class="badge" style="background:rgba(59,130,246,0.12);color:#60a5fa;border:1px solid rgba(59,130,246,0.35);margin-bottom:4px;display:inline-block;font-family:monospace;font-size:0.65rem;">${e.measurement_id}</span>` : '';
-    let s = `<div style="margin-bottom:4px;">${measId}<br><b style="color:#4ade80">${e.event}</b></div>`;
+    // One event can be sent to several GA4 properties at once (dual tagging).
+    // Show each property id as its own chip so a single click doesn't look
+    // like it fired the same event two or three separate times.
+    const ids = (e.measurement_ids && e.measurement_ids.length)
+        ? e.measurement_ids
+        : (e.measurement_id ? [e.measurement_id] : []);
+    const chip = (id) => {
+        const isApi = String(id).startsWith('(');
+        const bg = isApi ? 'rgba(168,85,247,0.12)' : 'rgba(59,130,246,0.12)';
+        const fg = isApi ? '#c4b5fd' : '#60a5fa';
+        const bd = isApi ? 'rgba(168,85,247,0.35)' : 'rgba(59,130,246,0.35)';
+        return `<span class="badge" style="background:${bg};color:${fg};border:1px solid ${bd};margin:0 3px 4px 0;display:inline-block;font-family:monospace;font-size:0.65rem;">${escapeHtml(id)}</span>`;
+    };
+    const measId = ids.map(chip).join('');
+    const hits = (e.hit_count && e.hit_count > 1)
+        ? `<span style="color:#64748b;font-size:0.65rem"> ×${e.hit_count}</span>` : '';
+    let s = `<div style="margin-bottom:4px;">${measId}<br><b style="color:#4ade80">${escapeHtml(e.event)}</b>${hits}</div>`;
     const pkeys = Object.keys(e.params || {});
     if (pkeys.length) {
-        s += `<div class="event-params">` + 
-             pkeys.map(k => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${k}</span>: <span style="color:#38bdf8">${e.params[k]}</span></div>`).join('') + 
+        s += `<div class="event-params">` +
+             pkeys.map(k => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${escapeHtml(k)}</span>: <span style="color:#38bdf8">${escapeHtml(String(e.params[k]))}</span></div>`).join('') +
              `</div>`;
     }
     return s;
@@ -563,6 +578,19 @@ function renderTable() {
                     const elLabel = el.element.id ? '#' + el.element.id : el.element.selector.substring(0, 40);
                     const trackIcon = el.skipped ? '⏭️' : (el.has_tracking ? '✅' : '⚠️');
                     const zone = el.element.zone || 'body';
+                    // Trust indicators: a result is only meaningful if the
+                    // click actually reached the intended element.
+                    const badges = [];
+                    if (!el.skipped && el.click_verified === false) {
+                        badges.push('<span class="badge" title="The click could not be confirmed on this exact element — treat its events with caution" style="background:rgba(251,146,60,0.12);color:#fdba74;border:1px solid rgba(251,146,60,0.35);font-size:0.55rem">unverified</span>');
+                    }
+                    if (el.element.is_download) {
+                        badges.push('<span class="badge" title="Download link" style="background:rgba(56,189,248,0.12);color:#7dd3fc;border:1px solid rgba(56,189,248,0.35);font-size:0.55rem">download</span>');
+                    }
+                    if (el.blocked_by) {
+                        badges.push(`<span class="badge" title="Covered by ${escapeHtml(el.blocked_by)} — the audit clicked through it" style="background:rgba(148,163,184,0.12);color:#cbd5e1;border:1px solid rgba(148,163,184,0.35);font-size:0.55rem">overlaid</span>`);
+                    }
+                    const badgeHtml = badges.length ? '<div style="margin-top:3px">' + badges.join(' ') + '</div>' : '';
                     const netReqs = el.network_requests || [];
                     const netCount = el.network_count || netReqs.length;
                     const netId = detailId + '-net-' + j;
@@ -575,7 +603,7 @@ function renderTable() {
                         : (el.skipped ? '<span style="color:#64748b">skipped</span>' : '<span style="color:#64748b">0</span>');
                     html += `<tr>
                         <td>${j + 1}</td>
-                        <td title="${el.element.selector}">${trackIcon} <span class="mono">${elLabel}</span></td>
+                        <td title="${el.element.selector}">${trackIcon} <span class="mono">${elLabel}</span>${badgeHtml}</td>
                         <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${el.element.text || '--'}</td>
                         <td>${formatElementType(el.element.tag)}</td>
                         <td style="text-align:center"><span class="badge" style="font-size:0.6rem">${zone}</span></td>
@@ -1070,6 +1098,19 @@ function renderDcTable() {
                     const elLabel = el.element.id ? '#' + el.element.id : el.element.selector.substring(0, 40);
                     const trackIcon = el.skipped ? '⏭️' : (el.has_tracking ? '✅' : '⚠️');
                     const zone = el.element.zone || 'body';
+                    // Trust indicators: a result is only meaningful if the
+                    // click actually reached the intended element.
+                    const badges = [];
+                    if (!el.skipped && el.click_verified === false) {
+                        badges.push('<span class="badge" title="The click could not be confirmed on this exact element — treat its events with caution" style="background:rgba(251,146,60,0.12);color:#fdba74;border:1px solid rgba(251,146,60,0.35);font-size:0.55rem">unverified</span>');
+                    }
+                    if (el.element.is_download) {
+                        badges.push('<span class="badge" title="Download link" style="background:rgba(56,189,248,0.12);color:#7dd3fc;border:1px solid rgba(56,189,248,0.35);font-size:0.55rem">download</span>');
+                    }
+                    if (el.blocked_by) {
+                        badges.push(`<span class="badge" title="Covered by ${escapeHtml(el.blocked_by)} — the audit clicked through it" style="background:rgba(148,163,184,0.12);color:#cbd5e1;border:1px solid rgba(148,163,184,0.35);font-size:0.55rem">overlaid</span>`);
+                    }
+                    const badgeHtml = badges.length ? '<div style="margin-top:3px">' + badges.join(' ') + '</div>' : '';
                     const netReqs = el.network_requests || [];
                     const netCount = el.network_count || netReqs.length;
                     const netId = detailId + '-net-' + j;
@@ -1082,7 +1123,7 @@ function renderDcTable() {
                         : (el.skipped ? '<span style="color:#64748b">skipped</span>' : '<span style="color:#64748b">0</span>');
                     html += `<tr>
                         <td>${j + 1}</td>
-                        <td title="${el.element.selector}">${trackIcon} <span class="mono">${elLabel}</span></td>
+                        <td title="${el.element.selector}">${trackIcon} <span class="mono">${elLabel}</span>${badgeHtml}</td>
                         <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${el.element.text || '--'}</td>
                         <td>${formatElementType(el.element.tag)}</td>
                         <td style="text-align:center"><span class="badge" style="font-size:0.6rem">${zone}</span></td>
