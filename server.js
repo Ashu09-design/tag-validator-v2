@@ -214,9 +214,25 @@ app.post('/api/sdr/run', (req, res) => {
     if (qaColumn) args.push('--qa-column', qaColumn);
     // Continue an interrupted run rather than re-clicking hundreds of rows.
     if (resume) args.push('--resume');
-    // A fresh run must not inherit the previous run's checkpoint.
+    // A fresh run must not inherit the previous run's checkpoint — but it must
+    // not destroy it either. These passes take half an hour, and deleting the
+    // last one the moment someone starts another (or mis-clicks Run) throws
+    // away finished work that cannot be recovered. Archive it instead, so the
+    // previous results are always still on disk.
     if (!resume) {
-        try { fs.unlinkSync(path.join(__dirname, 'sdr_results.json')); } catch {}
+        const live = path.join(__dirname, 'sdr_results.json');
+        if (fs.existsSync(live)) {
+            try {
+                const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                fs.renameSync(live, path.join(__dirname, `sdr_results.prev-${stamp}.json`));
+                const filled = path.join(__dirname, 'sdr_filled.xlsx');
+                if (fs.existsSync(filled)) {
+                    fs.renameSync(filled, path.join(__dirname, `sdr_filled.prev-${stamp}.xlsx`));
+                }
+            } catch {
+                try { fs.unlinkSync(live); } catch {}
+            }
+        }
     }
 
     lastRunMode = 'sdr';
