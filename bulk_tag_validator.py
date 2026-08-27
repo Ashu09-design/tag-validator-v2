@@ -2007,6 +2007,10 @@ FINAL_DRAIN_WAIT = 9.0
 # far more time to chase down than the extra seconds cost the run, and the
 # observed spread on these sites runs to ~5s for the first hit with the
 # second property following behind it.
+# How many candidate elements a single SDR row may try before settling for
+# the closest fit. Two is usually enough (header vs footer twin); three
+# covers a page with a hero, a promo and a nav copy of the same control.
+SDR_MAX_CANDIDATES = 3
 SDR_MIN_BEACON_WAIT = 10.0
 SDR_BEACON_MAX_WAIT = 20.0
 # How long to let a page settle before touching it.
@@ -4057,6 +4061,23 @@ def _sdr_label_norm(v):
     return re.sub(r'\s+', ' ', s).strip()
 
 
+def _sdr_element_fp(e):
+    """Identity for a discovered element that survives a page reload.
+
+    data-tvuid is assigned fresh on every scan, so it cannot be used to find
+    the same control again after the page has been reloaded between candidate
+    attempts. Text, href, region and enclosing heading together do identify
+    it — including telling apart three "Find a Provider" buttons that differ
+    only by which block they sit in.
+    """
+    return (
+        _norm_str(e.get('text'))[:60],
+        (e.get('href') or '').strip().lower(),
+        (e.get('zone') or 'body'),
+        _norm_str(e.get('context'))[:40],
+    )
+
+
 def _sdr_location_detail(case):
     """The specific part of an SDR Location, minus the page region.
 
@@ -4459,6 +4480,31 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             pass
         await asyncio.sleep(SDR_PAGE_SETTLE)
 
+        # Walk the page top to bottom before discovering anything. Most of
+        # these pages build their lower half lazily, so a scan done at the
+        # fold simply cannot see the promo blocks, tab strips and footer CTAs
+        # that SDR rows point at — those rows then resolve to a same-named
+        # control higher up the page and get judged against the wrong element.
+        try:
+            await page.evaluate("""async () => {
+                await new Promise((resolve) => {
+                    let total = 0;
+                    const step = 600;
+                    const timer = setInterval(() => {
+                        window.scrollBy(0, step);
+                        total += step;
+                        if (total >= document.body.scrollHeight || total > 25000) {
+                            clearInterval(timer);
+                            resolve();
+                        }
+                    }, 60);
+                });
+                window.scrollTo(0, 0);
+            }""")
+            await asyncio.sleep(2.0)
+        except Exception:
+            pass
+
         # Same preparation the click audit uses: keep clicks on-page, open
         # every menu so hidden targets exist, wrap the tracking APIs, and get
         # any consent dialog out of the way before measuring.
@@ -4578,6 +4624,46 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         sys.stdout.write(f"[SDR]   {len(base_elements)} clickable elements available for matching\n")
         sys.stdout.flush()
 
+        async def _reset_page():
+            """Reload the page and rebuild the element list.
+
+            Needed between candidate attempts for one SDR row. The first click
+            can open a form, switch a tab or expand a panel, and the second
+            candidate then gets clicked in a page state that never occurs for
+            a real user — which is how the hero "Find a Provider" kept being
+            reported for the row that means the promo one further down.
+            """
+            try:
+                await page.goto(page_url, wait_until="domcontentloaded", timeout=45000)
+                await asyncio.sleep(2.0)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=12000)
+                except Exception:
+                    pass
+                await page.evaluate("""async () => {
+                    await new Promise((resolve) => {
+                        let total = 0;
+                        const timer = setInterval(() => {
+                            window.scrollBy(0, 600); total += 600;
+                            if (total >= document.body.scrollHeight || total > 25000) {
+                                clearInterval(timer); resolve();
+                            }
+                        }, 60);
+                    });
+                    window.scrollTo(0, 0);
+                }""")
+                await asyncio.sleep(1.2)
+                await page.evaluate(BLOCK_NAVIGATION_JS)
+                await page.evaluate(EXPOSE_HIDDEN_JS)
+                await page.evaluate(CLOSE_CONSENT_UI_JS)
+                await page.evaluate(INSTRUMENT_TRACKING_JS)
+                await page.evaluate(HARVEST_TRACKING_JS)
+                await asyncio.sleep(0.4)
+                batch = await page.evaluate(DISCOVER_CLICKABLES_JS)
+                return [b for b in (batch or []) if b.get("uid")]
+            except Exception:
+                return []
+
         async def _fresh_elements():
             """Re-scan (and re-stamp) the page right before a click.
 
@@ -4653,13 +4739,24 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                         b, bs = e, sc
                 return b, bs
 
-            best, best_score = _pick_best(_score_all(elements))
+            def _ordered(cands):
+                """Best-first, but only within the tier that actually agrees."""
+                by_name = [x for x in cands if x[2] >= 8]
+                by_text = [x for x in cands if x[1] >= 8]
+                pool = by_name or by_text or cands
+                return [e for _s, _t, _n, e in sorted(pool, key=lambda x: -x[0])]
+
+            scored_now = _score_all(elements)
+            best, best_score = _pick_best(scored_now)
+            candidates = _ordered(scored_now)
             # Hidden targets (collapsed sub-menu links) only exist in the pool
             # captured while the menus were forced open.
             if (best is None or best_score < 4) and elements is not base_elements:
-                b2, bs2 = _pick_best(_score_all(base_elements))
+                alt = _score_all(base_elements)
+                b2, bs2 = _pick_best(alt)
                 if bs2 > best_score:
                     best, best_score = b2, bs2
+                    candidates = _ordered(alt)
             if best is None or best_score < 4:
                 # Distinguish "this content is no longer on the page" from
                 # "the control is there but could not be matched". The first
@@ -4683,288 +4780,337 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 sys.stdout.flush()
                 continue
 
-            loc_el = None
-            try:
-                cand = page.locator(f'[data-tvuid="{best["uid"]}"]')
-                if await cand.count() > 0:
-                    loc_el = cand.first
-            except Exception:
-                pass
-            if loc_el is None:
-                _record(case, "FAIL", "Element was discovered but no longer present when clicked")
-                continue
-
-            # --- make it visible / reachable ---
-            try:
-                if not await loc_el.is_visible(timeout=400):
-                    await page.evaluate(EXPOSE_HIDDEN_JS)
-                    await asyncio.sleep(0.35)
-            except Exception:
-                pass
-            try:
-                await loc_el.scroll_into_view_if_needed(timeout=2500)
-            except Exception:
-                pass
-            await asyncio.sleep(0.6)
-
-            # --- drain, then open this case's capture window ---
-            try:
-                await page.evaluate(HARVEST_TRACKING_JS)
-                await page.evaluate(READ_CLEAR_WITNESS_JS)
-            except Exception:
-                pass
-            await asyncio.sleep(0.15)
-            bookmark = len(all_requests)
-            current_cid["v"] = ci
-
-            hit = None
-            try:
-                hit = await loc_el.evaluate("""(e) => {
-                    const r = e.getBoundingClientRect();
-                    if (!r.width || !r.height) return {ok: false};
-                    const c = [[r.x + r.width/2, r.y + r.height/2],
-                               [r.x + r.width*0.25, r.y + r.height/2],
-                               [r.x + r.width*0.75, r.y + r.height/2]];
-                    for (const [x, y] of c) {
-                        if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
-                        const t = document.elementFromPoint(x, y);
-                        if (t && (t === e || e.contains(t) || t.contains(e))) return {ok: true, x, y};
-                    }
-                    return {ok: false};
-                }""")
-            except Exception:
-                pass
-            pierced = False
-            if not (hit and hit.get("ok")):
+            # A row is often ambiguous: several controls share a name and the
+            # SDR tells them apart only by Location ("footer_promo", "isi
+            # banner"). Guessing once and reporting the result gives confident
+            # but wrong data — a header link judged against a footer row.
+            # Instead, try the best candidates in turn and keep whichever one
+            # actually satisfies the row. The first clean pass wins; otherwise
+            # the closest fit is reported, so the reasons describe the element
+            # the row most plausibly meant.
+            attempts = []
+            for _cand_i, _cand_meta in enumerate(candidates[:SDR_MAX_CANDIDATES]):
+                best = _cand_meta
+                if _cand_i > 0:
+                    # Start this attempt from a page in its resting state, then
+                    # find the same control again by fingerprint — the uid it
+                    # carried belongs to the previous, now-discarded scan.
+                    refreshed = await _reset_page()
+                    want_fp = _sdr_element_fp(_cand_meta)
+                    again = next((e for e in refreshed
+                                  if _sdr_element_fp(e) == want_fp), None)
+                    if again is None:
+                        continue
+                    best = again
+                loc_el = None
                 try:
-                    await page.evaluate(CLOSE_CONSENT_UI_JS)
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.2)
-                    hit = await loc_el.evaluate(PIERCE_OVERLAY_JS)
-                    pierced = True
+                    cand = page.locator(f'[data-tvuid="{best["uid"]}"]')
+                    if await cand.count() > 0:
+                        loc_el = cand.first
                 except Exception:
                     pass
+                if loc_el is None:
+                    continue   # stale handle; try the next candidate
 
-            clicked, click_method = False, ""
-            if hit and hit.get("ok"):
+                # --- make it visible / reachable ---
                 try:
-                    for t in ("mouseMoved", "mousePressed", "mouseReleased"):
-                        args = {"type": t, "x": hit["x"], "y": hit["y"]}
-                        if t != "mouseMoved":
-                            args.update({"button": "left", "clickCount": 1})
-                        await cdp.send("Input.dispatchMouseEvent", args)
-                        if t == "mousePressed":
-                            await asyncio.sleep(0.05)
-                    clicked, click_method = True, "cdp-click"
+                    if not await loc_el.is_visible(timeout=400):
+                        await page.evaluate(EXPOSE_HIDDEN_JS)
+                        await asyncio.sleep(0.35)
                 except Exception:
                     pass
-            if not clicked:
                 try:
-                    await loc_el.evaluate("e => e.click()")
-                    clicked, click_method = True, "js-click"
+                    await loc_el.scroll_into_view_if_needed(timeout=2500)
                 except Exception:
                     pass
-            if pierced:
-                try:
-                    await page.evaluate(RESTORE_OVERLAY_JS)
-                except Exception:
-                    pass
+                await asyncio.sleep(0.6)
 
-            verified = False
-            if clicked:
-                await asyncio.sleep(0.25)
+                # --- drain, then open this case's capture window ---
                 try:
-                    w = await page.evaluate(READ_CLEAR_WITNESS_JS)
-                    verified = best["uid"] in ((w or {}).get("uids") or [])
+                    await page.evaluate(HARVEST_TRACKING_JS)
+                    await page.evaluate(READ_CLEAR_WITNESS_JS)
                 except Exception:
                     pass
+                await asyncio.sleep(0.15)
+                bookmark = len(all_requests)
+                current_cid["v"] = ci
 
-            if not clicked:
+                hit = None
+                try:
+                    hit = await loc_el.evaluate("""(e) => {
+                        const r = e.getBoundingClientRect();
+                        if (!r.width || !r.height) return {ok: false};
+                        const c = [[r.x + r.width/2, r.y + r.height/2],
+                                   [r.x + r.width*0.25, r.y + r.height/2],
+                                   [r.x + r.width*0.75, r.y + r.height/2]];
+                        for (const [x, y] of c) {
+                            if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
+                            const t = document.elementFromPoint(x, y);
+                            if (t && (t === e || e.contains(t) || t.contains(e))) return {ok: true, x, y};
+                        }
+                        return {ok: false};
+                    }""")
+                except Exception:
+                    pass
+                pierced = False
+                if not (hit and hit.get("ok")):
+                    try:
+                        await page.evaluate(CLOSE_CONSENT_UI_JS)
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(0.2)
+                        hit = await loc_el.evaluate(PIERCE_OVERLAY_JS)
+                        pierced = True
+                    except Exception:
+                        pass
+
+                clicked, click_method = False, ""
+                if hit and hit.get("ok"):
+                    try:
+                        for t in ("mouseMoved", "mousePressed", "mouseReleased"):
+                            args = {"type": t, "x": hit["x"], "y": hit["y"]}
+                            if t != "mouseMoved":
+                                args.update({"button": "left", "clickCount": 1})
+                            await cdp.send("Input.dispatchMouseEvent", args)
+                            if t == "mousePressed":
+                                await asyncio.sleep(0.05)
+                        clicked, click_method = True, "cdp-click"
+                    except Exception:
+                        pass
+                if not clicked:
+                    try:
+                        await loc_el.evaluate("e => e.click()")
+                        clicked, click_method = True, "js-click"
+                    except Exception:
+                        pass
+                if pierced:
+                    try:
+                        await page.evaluate(RESTORE_OVERLAY_JS)
+                    except Exception:
+                        pass
+
+                verified = False
+                if clicked:
+                    await asyncio.sleep(0.25)
+                    try:
+                        w = await page.evaluate(READ_CLEAR_WITNESS_JS)
+                        verified = best["uid"] in ((w or {}).get("uids") or [])
+                    except Exception:
+                        pass
+
+                if not clicked:
+                    current_cid["v"] = -1
+                    continue   # this candidate is unclickable; try the next one
+
+                # --- wait for the beacon, then close the window ---
+                await asyncio.sleep(1.0)
+                try:
+                    early = await page.evaluate(PEEK_TRACKING_JS)
+                except Exception:
+                    early = []
+                expect = bool(early)
+                # A site that tags to two GA4 properties does not always send both
+                # hits together — one can arrive seconds after the other. A pure
+                # "quiet for 1.2s" rule closes the window in the gap between them
+                # and then reports the event as missing from the property that had
+                # not answered yet. So when an event is expected, hold the window
+                # open for a minimum period regardless of quiet, and only let the
+                # quiet detector extend past that.
+                started = time.time()
+                min_wait = SDR_MIN_BEACON_WAIT if expect else 0.8
+                deadline = started + (SDR_BEACON_MAX_WAIT if expect else CLICK_IDLE_WAIT)
+                last_n, last_change = len(all_requests), time.time()
+                quiet = 2.0 if expect else 0.8
+                while time.time() < deadline:
+                    await asyncio.sleep(0.25)
+                    if len(all_requests) != last_n:
+                        last_n, last_change = len(all_requests), time.time()
+                        continue
+                    if time.time() - started < min_wait:
+                        continue
+                    if time.time() - last_change >= quiet:
+                        break
                 current_cid["v"] = -1
-                _record(case, "FAIL", "Element found but could not be clicked",
-                        {"matched_element": best.get("text", "")[:60]})
+
+                window_reqs = all_requests[bookmark:]
+                try:
+                    api_caps = await page.evaluate(HARVEST_TRACKING_JS)
+                except Exception:
+                    api_caps = []
+
+                # --- collect what actually fired ---
+                net_events = []
+                for req in window_reqs:
+                    ul = req["url"].lower()
+                    if "/g/collect" in ul or (("google-analytics.com" in ul
+                                               or "analytics.google.com" in ul) and "collect" in ul):
+                        for ev in parse_ga4_event(req["url"], req["post"]):
+                            if ev.get("event") and not _is_noise_event(ev["event"]):
+                                net_events.append(ev)
+                                if ev.get("measurement_id"):
+                                    detected_ids.add(ev["measurement_id"])
+
+                api_events = []
+                for cap in api_caps or []:
+                    det = cap.get("detail") or {}
+                    if cap.get("type") in ("dataLayer", "adobeDataLayer", "gtag") and isinstance(det, dict):
+                        nm = str(det.get("event") or det.get("xdm:eventType") or "")
+                        if nm and not _is_noise_event(nm):
+                            api_events.append({
+                                "event": nm,
+                                "measurement_id": "(dataLayer)",
+                                "params": {k: v for k, v in det.items()
+                                           if k != "event" and isinstance(v, (str, int, float, bool))},
+                                # Keep the push intact as well. These layers nest
+                                # most of the interesting values under event_data,
+                                # and flattening to scalars threw them away — which
+                                # is what made "the tag doesn't map it" look
+                                # identical to "the site never produces it".
+                                "raw": det,
+                            })
+
+                # Only hits on the selected GA4 property count as evidence.
+                if ga4_id and ga4_mode != "any":
+                    scoped = [e for e in net_events if e.get("measurement_id") == ga4_id]
+                else:
+                    scoped = list(net_events)
+
+                expected_event = case["expected_event"]
+                cands = [e for e in scoped if _norm_str(e.get("event")) == _norm_str(expected_event)]
+
+                reasons, param_diff, notes = [], [], []
+                matched = None
+                if cands:
+                    # Several hits can carry the same event name; judge against the
+                    # one that satisfies the most of this row's expectations.
+                    def fit(ev):
+                        return sum(1 for p, v in case["expected_params"].items()
+                                   if _sdr_param_matches(
+                                       p, v, _sdr_actual_value(ev.get("params") or {}, p), page_url))
+                    matched = max(cands, key=fit)
+
+                if matched is None:
+                    fired = sorted({e.get("event", "") for e in scoped})
+                    api_named = sorted({e["event"] for e in api_events
+                                        if _norm_str(e["event"]) == _norm_str(expected_event)})
+                    other_prop = sorted({e.get("measurement_id", "") for e in net_events
+                                         if _norm_str(e.get("event")) == _norm_str(expected_event)})
+                    if api_named and not other_prop:
+                        reasons.append(
+                            f"'{expected_event}' was pushed to the dataLayer but no GA4 hit was sent"
+                            + (f" on {ga4_id}" if ga4_id else ""))
+                    elif other_prop:
+                        reasons.append(
+                            f"'{expected_event}' fired only on {', '.join(other_prop)}"
+                            f" — not on the selected property {ga4_id}")
+                    else:
+                        reasons.append(
+                            f"Expected event '{expected_event}' did not fire"
+                            + (f". Events seen: {', '.join(fired)}" if fired else " (no GA4 event fired)"))
+                else:
+                    actual_params = matched.get("params") or {}
+                    for pname, pexp in case["expected_params"].items():
+                        pact = _sdr_actual_value(actual_params, pname)
+                        ok = _sdr_param_matches(pname, pexp, pact, page_url)
+                        cosmetic = False
+                        if not ok and _sdr_cosmetic_match(pexp, pact):
+                            # Same value, written differently. Counts as a pass.
+                            ok = True
+                            cosmetic = True
+                            notes.append(f"{pname}: SDR says '{pexp}', site sends '{pact}' "
+                                         f"(spacing/punctuation only)")
+                        param_diff.append({"param": pname, "expected": pexp,
+                                           "actual": "" if pact is None else str(pact),
+                                           "match": ok, "cosmetic": cosmetic})
+                        if not ok:
+                            if pact is None or str(pact) == "":
+                                # Three very different faults look identical here,
+                                # and they need different fixes:
+                                #   * the value is in the data layer but the GA4
+                                #     tag never maps it  -> fix the tag
+                                #   * other hits carry it, this one does not
+                                #     -> fix this event's config
+                                #   * nothing produces it at all -> fix the site
+                                anywhere = any(
+                                    _sdr_actual_value(e.get("params") or {}, pname) not in (None, "")
+                                    for e in net_events)
+                                in_dl = _sdr_find_in_datalayer(api_events, pname)
+                                if in_dl is not None:
+                                    same = _sdr_cosmetic_match(pexp, in_dl)
+                                    reasons.append(
+                                        f"{pname}: expected '{pexp}' — the value is in the data layer"
+                                        f" ({'matching' if same else repr(in_dl)}) but the GA4 tag does"
+                                        f" not send it as an event parameter")
+                                elif anywhere:
+                                    reasons.append(
+                                        f"{pname}: expected '{pexp}' but not sent on this event "
+                                        f"(it is present on other hits)")
+                                else:
+                                    reasons.append(
+                                        f"{pname}: expected '{pexp}' but nothing on the page produces it")
+                            else:
+                                note = ""
+                                # When the value the site sent matches THIS row's
+                                # own button name but the SDR's expected value does
+                                # not, the sheet is almost certainly wrong — these
+                                # templates are filled by copying a row and the
+                                # text field gets left behind. Saying so turns an
+                                # unexplained failure into a one-line sheet fix.
+                                if pname in ("link_text", "link_url"):
+                                    own = _norm_str(case.get("button_name"))
+                                    def _tk(v):
+                                        return {t for t in re.split(r'[^a-z0-9]+', _norm_str(v)) if len(t) > 2}
+                                    a_t, o_t, e_t = _tk(pact), _tk(own), _tk(pexp)
+                                    if o_t:
+                                        a_fit = len(a_t & o_t) / len(o_t)
+                                        e_fit = len(e_t & o_t) / len(o_t)
+                                        if a_fit >= 0.8 and e_fit < 0.5:
+                                            note = (" — note: what fired matches this row's own"
+                                                    " Link/Button Name, so the SDR's expected value"
+                                                    " looks copied from another row")
+                                reasons.append(f"{pname}: expected '{pexp}' but got '{pact}'{note}")
+
+                status = "PASS" if not reasons else "FAIL"
+                if status == "PASS" and not verified:
+                    # Everything matched, but we could not prove the click landed on
+                    # this exact element — say so rather than quietly passing it.
+                    notes.append("click could not be verified on this exact element")
+                # Cosmetic notes ride along with the verdict so a pass still shows
+                # what differed, without turning it into a failure.
+                if notes:
+                    prefix = "Passed with notes — " if status == "PASS" else "Also (not counted as failure) — "
+                    reasons.append(prefix + "; ".join(notes))
+
+                attempts.append({
+                    "fit": (1 if matched is not None else 0,
+                            sum(1 for d in param_diff if d["match"]),
+                            -len(reasons)),
+                    "status": status, "reasons": list(reasons),
+                    "matched": matched, "param_diff": list(param_diff),
+                    "scoped": list(scoped), "best": best,
+                    "click_method": click_method, "verified": verified,
+                })
+                if status == "PASS":
+                    break
+                # If another candidate is still to be tried, the loop reloads
+                # the page for it rather than continuing from this click.
+
+            if not attempts:
+                _record(case, "FAIL", "Element found but could not be clicked")
                 sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> CLICK FAILED\n")
                 sys.stdout.flush()
                 continue
 
-            # --- wait for the beacon, then close the window ---
-            await asyncio.sleep(1.0)
-            try:
-                early = await page.evaluate(PEEK_TRACKING_JS)
-            except Exception:
-                early = []
-            expect = bool(early)
-            # A site that tags to two GA4 properties does not always send both
-            # hits together — one can arrive seconds after the other. A pure
-            # "quiet for 1.2s" rule closes the window in the gap between them
-            # and then reports the event as missing from the property that had
-            # not answered yet. So when an event is expected, hold the window
-            # open for a minimum period regardless of quiet, and only let the
-            # quiet detector extend past that.
-            started = time.time()
-            min_wait = SDR_MIN_BEACON_WAIT if expect else 0.8
-            deadline = started + (SDR_BEACON_MAX_WAIT if expect else CLICK_IDLE_WAIT)
-            last_n, last_change = len(all_requests), time.time()
-            quiet = 2.0 if expect else 0.8
-            while time.time() < deadline:
-                await asyncio.sleep(0.25)
-                if len(all_requests) != last_n:
-                    last_n, last_change = len(all_requests), time.time()
-                    continue
-                if time.time() - started < min_wait:
-                    continue
-                if time.time() - last_change >= quiet:
-                    break
-            current_cid["v"] = -1
-
-            window_reqs = all_requests[bookmark:]
-            try:
-                api_caps = await page.evaluate(HARVEST_TRACKING_JS)
-            except Exception:
-                api_caps = []
-
-            # --- collect what actually fired ---
-            net_events = []
-            for req in window_reqs:
-                ul = req["url"].lower()
-                if "/g/collect" in ul or (("google-analytics.com" in ul
-                                           or "analytics.google.com" in ul) and "collect" in ul):
-                    for ev in parse_ga4_event(req["url"], req["post"]):
-                        if ev.get("event") and not _is_noise_event(ev["event"]):
-                            net_events.append(ev)
-                            if ev.get("measurement_id"):
-                                detected_ids.add(ev["measurement_id"])
-
-            api_events = []
-            for cap in api_caps or []:
-                det = cap.get("detail") or {}
-                if cap.get("type") in ("dataLayer", "adobeDataLayer", "gtag") and isinstance(det, dict):
-                    nm = str(det.get("event") or det.get("xdm:eventType") or "")
-                    if nm and not _is_noise_event(nm):
-                        api_events.append({
-                            "event": nm,
-                            "measurement_id": "(dataLayer)",
-                            "params": {k: v for k, v in det.items()
-                                       if k != "event" and isinstance(v, (str, int, float, bool))},
-                            # Keep the push intact as well. These layers nest
-                            # most of the interesting values under event_data,
-                            # and flattening to scalars threw them away — which
-                            # is what made "the tag doesn't map it" look
-                            # identical to "the site never produces it".
-                            "raw": det,
-                        })
-
-            # Only hits on the selected GA4 property count as evidence.
-            if ga4_id and ga4_mode != "any":
-                scoped = [e for e in net_events if e.get("measurement_id") == ga4_id]
-            else:
-                scoped = list(net_events)
-
-            expected_event = case["expected_event"]
-            cands = [e for e in scoped if _norm_str(e.get("event")) == _norm_str(expected_event)]
-
-            reasons, param_diff, notes = [], [], []
-            matched = None
-            if cands:
-                # Several hits can carry the same event name; judge against the
-                # one that satisfies the most of this row's expectations.
-                def fit(ev):
-                    return sum(1 for p, v in case["expected_params"].items()
-                               if _sdr_param_matches(
-                                   p, v, _sdr_actual_value(ev.get("params") or {}, p), page_url))
-                matched = max(cands, key=fit)
-
-            if matched is None:
-                fired = sorted({e.get("event", "") for e in scoped})
-                api_named = sorted({e["event"] for e in api_events
-                                    if _norm_str(e["event"]) == _norm_str(expected_event)})
-                other_prop = sorted({e.get("measurement_id", "") for e in net_events
-                                     if _norm_str(e.get("event")) == _norm_str(expected_event)})
-                if api_named and not other_prop:
-                    reasons.append(
-                        f"'{expected_event}' was pushed to the dataLayer but no GA4 hit was sent"
-                        + (f" on {ga4_id}" if ga4_id else ""))
-                elif other_prop:
-                    reasons.append(
-                        f"'{expected_event}' fired only on {', '.join(other_prop)}"
-                        f" — not on the selected property {ga4_id}")
-                else:
-                    reasons.append(
-                        f"Expected event '{expected_event}' did not fire"
-                        + (f". Events seen: {', '.join(fired)}" if fired else " (no GA4 event fired)"))
-            else:
-                actual_params = matched.get("params") or {}
-                for pname, pexp in case["expected_params"].items():
-                    pact = _sdr_actual_value(actual_params, pname)
-                    ok = _sdr_param_matches(pname, pexp, pact, page_url)
-                    cosmetic = False
-                    if not ok and _sdr_cosmetic_match(pexp, pact):
-                        # Same value, written differently. Counts as a pass.
-                        ok = True
-                        cosmetic = True
-                        notes.append(f"{pname}: SDR says '{pexp}', site sends '{pact}' "
-                                     f"(spacing/punctuation only)")
-                    param_diff.append({"param": pname, "expected": pexp,
-                                       "actual": "" if pact is None else str(pact),
-                                       "match": ok, "cosmetic": cosmetic})
-                    if not ok:
-                        if pact is None or str(pact) == "":
-                            # Three very different faults look identical here,
-                            # and they need different fixes:
-                            #   * the value is in the data layer but the GA4
-                            #     tag never maps it  -> fix the tag
-                            #   * other hits carry it, this one does not
-                            #     -> fix this event's config
-                            #   * nothing produces it at all -> fix the site
-                            anywhere = any(
-                                _sdr_actual_value(e.get("params") or {}, pname) not in (None, "")
-                                for e in net_events)
-                            in_dl = _sdr_find_in_datalayer(api_events, pname)
-                            if in_dl is not None:
-                                same = _sdr_cosmetic_match(pexp, in_dl)
-                                reasons.append(
-                                    f"{pname}: expected '{pexp}' — the value is in the data layer"
-                                    f" ({'matching' if same else repr(in_dl)}) but the GA4 tag does"
-                                    f" not send it as an event parameter")
-                            elif anywhere:
-                                reasons.append(
-                                    f"{pname}: expected '{pexp}' but not sent on this event "
-                                    f"(it is present on other hits)")
-                            else:
-                                reasons.append(
-                                    f"{pname}: expected '{pexp}' but nothing on the page produces it")
-                        else:
-                            note = ""
-                            # When the value the site sent matches THIS row's
-                            # own button name but the SDR's expected value does
-                            # not, the sheet is almost certainly wrong — these
-                            # templates are filled by copying a row and the
-                            # text field gets left behind. Saying so turns an
-                            # unexplained failure into a one-line sheet fix.
-                            if pname in ("link_text", "link_url"):
-                                own = _norm_str(case.get("button_name"))
-                                def _tk(v):
-                                    return {t for t in re.split(r'[^a-z0-9]+', _norm_str(v)) if len(t) > 2}
-                                a_t, o_t, e_t = _tk(pact), _tk(own), _tk(pexp)
-                                if o_t:
-                                    a_fit = len(a_t & o_t) / len(o_t)
-                                    e_fit = len(e_t & o_t) / len(o_t)
-                                    if a_fit >= 0.8 and e_fit < 0.5:
-                                        note = (" — note: what fired matches this row's own"
-                                                " Link/Button Name, so the SDR's expected value"
-                                                " looks copied from another row")
-                            reasons.append(f"{pname}: expected '{pexp}' but got '{pact}'{note}")
-
-            status = "PASS" if not reasons else "FAIL"
-            if status == "PASS" and not verified:
-                # Everything matched, but we could not prove the click landed on
-                # this exact element — say so rather than quietly passing it.
-                notes.append("click could not be verified on this exact element")
-            # Cosmetic notes ride along with the verdict so a pass still shows
-            # what differed, without turning it into a failure.
-            if notes:
-                prefix = "Passed with notes — " if status == "PASS" else "Also (not counted as failure) — "
-                reasons.append(prefix + "; ".join(notes))
+            pick = max(attempts, key=lambda a: a["fit"])
+            status = pick["status"]
+            reasons = pick["reasons"]
+            matched = pick["matched"]
+            param_diff = pick["param_diff"]
+            scoped = pick["scoped"]
+            best = pick["best"]
+            click_method = pick["click_method"]
+            verified = pick["verified"]
+            if len(attempts) > 1:
+                reasons.append(f"(tried {len(attempts)} candidate elements; reporting the closest fit)")
 
             _record(case, status, "; ".join(reasons), {
                 "actual_event": (matched or {}).get("event", ""),
