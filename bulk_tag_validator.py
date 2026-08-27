@@ -4010,6 +4010,26 @@ def _sdr_param_matches(pname, expected, actual, base_url=""):
     return _norm_str(exp) == _norm_str(act)
 
 
+def _sdr_label_norm(v):
+    """Normalise a clickable's label for matching against an SDR row.
+
+    Accordions and disclosure widgets rename themselves as they are used: the
+    control an SDR calls "Expand All" reads "Collapse all" once something has
+    opened it, and each item is exposed to assistive tech as
+    "Expand: How is it made?". Matching raw text means the same button matches
+    or misses depending on what an earlier row happened to click, so the
+    toggle affordance is stripped and its two states are treated as one.
+    """
+    s = _norm_str(v)
+    if not s:
+        return ''
+    # "Expand: How is it made?" -> "How is it made?"
+    s = re.sub(r'^(expand|collapse|open|close|show|hide|toggle)\s*[:\-–]\s*', '', s)
+    # "Collapse all" and "Expand all" are the same control in two states.
+    s = re.sub(r'\b(expand|collapse|show|hide|open|close)\b', 'toggle', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
 def _sdr_actual_value(params, pname):
     """Read a parameter out of a captured hit.
 
@@ -4059,19 +4079,21 @@ def _sdr_score_element(case, el, base_url=""):
             score += 10
 
     def _tokens(v):
-        return {t for t in re.split(r'[^a-z0-9]+', _norm_str(v)) if len(t) > 2}
+        return {t for t in re.split(r'[^a-z0-9]+', _sdr_label_norm(v)) if len(t) > 2}
 
+    el_label = _sdr_label_norm(el.get('text'))
     el_tokens = _tokens(el.get('text'))
 
     def _agree(want):
         """How strongly this element's label agrees with `want`."""
-        w = _norm_str(want)
+        w = _sdr_label_norm(want)
         if not w:
             return 0
         # Ignore trailing punctuation: SDRs write "What is it" for a heading
         # rendered as "What is it?".
         w_trim = w.rstrip('?!.:;')
-        el_trim = el_text.rstrip('?!.:;')
+        el_trim = el_label.rstrip('?!.:;')
+        el_text = el_label   # compare on the normalised label
         if w == el_text or w_trim == el_trim:
             return 12
         if len(w) > 3 and (w in el_text or el_text in w):
@@ -4363,6 +4385,13 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     pass
         except Exception:
             pass
+        # Only NAVIGATION openers get clicked. Content accordions match the
+        # same selectors, and opening them before testing changes the very
+        # thing under test: a disclosure button reports its current state, so
+        # a pre-expanded "Expand All" fires link_text "collapse all" and the
+        # row fails against an SDR that describes the page as a person finds
+        # it. Nav menus must be opened to reach sub-menu links; body
+        # accordions must be left exactly as the page loaded.
         for sel in ('button[aria-label*="menu" i]', 'button[class*="hamburger" i]',
                     'button[class*="menu-toggle" i]', '[aria-haspopup="true"]',
                     'button[aria-expanded="false"]'):
@@ -4373,7 +4402,22 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     if not await el_o.is_visible(timeout=250):
                         continue
                     if await el_o.evaluate("""e => {
-                        let n = e;
+                        // Skip anything that is not inside a navigation region.
+                        let n = e, inNav = false;
+                        while (n && n !== document.body) {
+                            const tag = n.tagName || '';
+                            const role = (n.getAttribute && n.getAttribute('role') || '').toLowerCase();
+                            const id = (n.id || '').toLowerCase();
+                            const cls = (typeof n.className === 'string' ? n.className : '').toLowerCase();
+                            if (tag === 'HEADER' || tag === 'NAV' || role === 'banner'
+                                || role === 'navigation' || /header|navbar|nav-|menu/.test(id + ' ' + cls)) {
+                                inNav = true;
+                                break;
+                            }
+                            n = n.parentElement;
+                        }
+                        if (!inNav) return true;
+                        n = e;
                         while (n && n !== document.body) {
                             const id = (n.id || '').toLowerCase();
                             const cls = (typeof n.className === 'string' ? n.className : '').toLowerCase();
@@ -4766,6 +4810,12 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 "click_method": click_method,
                 "click_verified": verified,
             })
+            # A page can hold dozens of rows and take ten minutes; waiting for
+            # the page to end before saving would still lose most of a run
+            # that dies part-way through one.
+            if (ci + 1) % 5 == 0:
+                _flush(partial=True)
+
             mark = "PASS" if status == "PASS" else "FAIL"
             sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> {mark}"
                              f"{'' if status == 'PASS' else ' | ' + '; '.join(reasons)[:110]}\n")
@@ -4796,7 +4846,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             except Exception:
                 pass
 
-        # One page done — checkpoint before moving to the next.
+        # Page finished — checkpoint before moving to the next.
         _flush(partial=True)
 
     _flush(partial=False)
