@@ -3886,6 +3886,14 @@ def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
     c_name = col_of('link/button name', 'link/button', 'button name')
     c_event = col_of('ga4 event name', 'ga4 event', 'event name')
 
+    # Row 1 is not decoration: for each column it records the key the value
+    # carries in the site's own EMU/Segment data layer, while row 2 names the
+    # GA4 parameter it should end up as. "Item Clicked Text" in the data layer
+    # becomes "link_text" in GA4. Keeping both is what lets a row be checked
+    # against the network hit AND the data layer, which are different systems
+    # that can disagree.
+    emu_row = [str(v or '').strip() for v in (grid[hr - 2] if hr >= 2 else ())]
+
     # Columns that declare a GA4 parameter, e.g. "Link URL (link_url)".
     param_cols = {}
     for i, h in enumerate(headers):
@@ -3914,6 +3922,7 @@ def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
             continue   # spacer / section heading / not a test case
 
         expected_params = {}
+        expected_emu = {}
         for col, pname in param_cols.items():
             v = _sdr_clean(_sdr_cellv(grid, r, col))
             # "<link url>", "<provider_name>" and friends are authoring
@@ -3922,6 +3931,10 @@ def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
             # such row for no reason, so they are treated as unspecified.
             if v and not re.fullmatch(r'<[^>]*>', v.strip()):
                 expected_params[pname] = v
+                emu_name = emu_row[col - 1] if col - 1 < len(emu_row) else ''
+                emu_name = '' if emu_name in ('-', '', 'None') else emu_name
+                if emu_name:
+                    expected_emu[emu_name] = v
 
         # "All Pages" / "Global" rows still need a concrete page to test on.
         eff = page_url
@@ -3940,6 +3953,9 @@ def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
             "link_url": expected_params.get('link_url', ''),
             "expected_event": expected_event,
             "expected_params": expected_params,
+            "expected_emu": expected_emu,
+            "emu_event": (emu_row[c_event - 1]
+                          if c_event and c_event - 1 < len(emu_row) else ''),
         })
 
     try:
@@ -4122,7 +4138,14 @@ def _sdr_find_in_datalayer(api_events, pname):
     the first is a site fix, the second a tag fix. Pushes nest values under
     `event_data`, so the search is recursive.
     """
-    target = str(pname or '').lower().replace('_', '')
+    # The sheet writes these names for humans ("Item Clicked Text") while the
+    # data layer uses code style ("item_clicked_text"), so separators of every
+    # kind have to come out before comparing — stripping only underscores left
+    # every multi-word key unmatched.
+    def _key(x):
+        return re.sub(r'[\s_\-.]+', '', str(x or '').strip().lower())
+
+    target = _key(pname)
     if not target:
         return None
 
@@ -4130,7 +4153,7 @@ def _sdr_find_in_datalayer(api_events, pname):
         if depth > 4 or not isinstance(node, dict):
             return None
         for k, v in node.items():
-            if str(k).lower().replace('_', '') == target and isinstance(v, (str, int, float, bool)):
+            if _key(k) == target and isinstance(v, (str, int, float, bool)):
                 return str(v)
         for v in node.values():
             if isinstance(v, dict):
@@ -4389,6 +4412,9 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             "matched_element": "",
             "click_method": "",
             "click_verified": False,
+            "dl_status": "",
+            "dl_reason": "",
+            "dl_diff": [],
         }
         if extra:
             row.update(extra)
@@ -5069,6 +5095,58 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                                                     " looks copied from another row")
                                 reasons.append(f"{pname}: expected '{pexp}' but got '{pact}'{note}")
 
+                # ---- second, independent verdict: the data layer ----
+                # The sheet describes two systems at once. GA4 may not carry a
+                # value the site does provide (a tag-mapping gap), and the data
+                # layer may be missing something GA4 derives itself. Judging both
+                # separately says which side is actually at fault instead of
+                # collapsing them into one misleading Fail.
+                dl_reasons, dl_diff = [], []
+                # A click on these pages also triggers an SPA route change, so
+                # the buffer holds the click's own push AND a page-context
+                # push. Reading whichever came first picks up the new page's
+                # values and reports them against the element that was
+                # clicked. Put the pushes that actually describe a click —
+                # the ones carrying the click keys — at the front.
+                def _is_click_push(e):
+                    blob = json.dumps(e.get("raw") or {}, default=str).lower()
+                    return any(k in blob for k in (
+                        "ga4_event_link", "item_clicked", "link_url", "linktext", "linkhref"))
+                dl_sources = [{"raw": e.get("raw"), "params": e.get("params")}
+                              for e in api_events if _is_click_push(e)]
+                dl_sources += [{"raw": e.get("raw"), "params": e.get("params")}
+                               for e in api_events if not _is_click_push(e)]
+                if not case.get("expected_emu"):
+                    dl_status = "N/A"
+                    dl_reasons.append("sheet does not name data-layer keys for this row")
+                elif not dl_sources:
+                    dl_status = "FAIL"
+                    dl_reasons.append("no data-layer event was pushed by this click")
+                else:
+                    emu_ev = (case.get("emu_event") or "").strip()
+                    if emu_ev and emu_ev not in ('-',):
+                        got_ev = _sdr_find_in_datalayer(dl_sources, emu_ev)
+                        if got_ev is None:
+                            got_ev = _sdr_find_in_datalayer(dl_sources, "ga4_event_link")
+                        if got_ev is not None and not _sdr_cosmetic_match(expected_event, got_ev):
+                            dl_reasons.append(
+                                f"event: expected '{expected_event}' but the data layer says '{got_ev}'")
+                    for emu_key, exp_val in case["expected_emu"].items():
+                        got = _sdr_find_in_datalayer(dl_sources, emu_key)
+                        ok_dl = got is not None and (
+                            _sdr_param_matches(emu_key, exp_val, got, page_url)
+                            or _sdr_cosmetic_match(exp_val, got))
+                        dl_diff.append({"key": emu_key, "expected": exp_val,
+                                        "actual": "" if got is None else str(got),
+                                        "match": ok_dl})
+                        if not ok_dl:
+                            if got is None:
+                                dl_reasons.append(f"{emu_key}: not present in the data layer")
+                            else:
+                                dl_reasons.append(
+                                    f"{emu_key}: expected '{exp_val}' but the data layer has '{got}'")
+                    dl_status = "PASS" if not dl_reasons else "FAIL"
+
                 status = "PASS" if not reasons else "FAIL"
                 if status == "PASS" and not verified:
                     # Everything matched, but we could not prove the click landed on
@@ -5081,13 +5159,20 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     reasons.append(prefix + "; ".join(notes))
 
                 attempts.append({
+                    # Rank by: did the expected event fire, how many GA4
+                    # parameters agreed, then how many data-layer keys agreed.
+                    # A candidate that satisfies both layers is the one the
+                    # row meant.
                     "fit": (1 if matched is not None else 0,
                             sum(1 for d in param_diff if d["match"]),
+                            sum(1 for d in dl_diff if d["match"]),
                             -len(reasons)),
                     "status": status, "reasons": list(reasons),
                     "matched": matched, "param_diff": list(param_diff),
                     "scoped": list(scoped), "best": best,
                     "click_method": click_method, "verified": verified,
+                    "dl_status": dl_status, "dl_reasons": list(dl_reasons),
+                    "dl_diff": list(dl_diff),
                 })
                 if status == "PASS":
                     break
@@ -5109,6 +5194,9 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             best = pick["best"]
             click_method = pick["click_method"]
             verified = pick["verified"]
+            dl_status = pick["dl_status"]
+            dl_reasons = pick["dl_reasons"]
+            dl_diff = pick["dl_diff"]
             if len(attempts) > 1:
                 reasons.append(f"(tried {len(attempts)} candidate elements; reporting the closest fit)")
 
@@ -5121,6 +5209,9 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 "measurement_id": (matched or {}).get("measurement_id", ""),
                 "click_method": click_method,
                 "click_verified": verified,
+                "dl_status": dl_status,
+                "dl_reason": "; ".join(dl_reasons),
+                "dl_diff": dl_diff,
             })
             # A page can hold dozens of rows and take ten minutes; waiting for
             # the page to end before saving would still lose most of a run
@@ -5128,7 +5219,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             if (ci + 1) % 5 == 0:
                 _flush(partial=True)
 
-            mark = "PASS" if status == "PASS" else "FAIL"
+            mark = ("PASS" if status == "PASS" else "FAIL") + "/DL:" + (dl_status or "-")
             sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> {mark}"
                              f"{'' if status == 'PASS' else ' | ' + '; '.join(reasons)[:110]}\n")
             sys.stdout.flush()
@@ -5229,6 +5320,16 @@ def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
         ws.cell(header_row, target_col).value = "Live/Prod QA"
         ws.cell(header_row, target_col).font = Font(bold=True)
 
+    # One column is added — the only structural change — because the sheet has
+    # a single QA column and there are two independent verdicts to report.
+    dl_col = target_col + 1
+    existing = str(ws.cell(header_row, dl_col).value or '').strip().lower()
+    if existing != 'data layer qa':
+        ws.insert_cols(dl_col)
+        ws.cell(header_row, dl_col).value = "Data Layer QA"
+        ws.cell(header_row, dl_col).font = Font(bold=True)
+    ws.column_dimensions[get_column_letter(dl_col)].width = 16
+
     fill_pass = PatternFill("solid", fgColor="C6EFCE")
     fill_note = PatternFill("solid", fgColor="FFF2CC")
     fill_fail = PatternFill("solid", fgColor="FFC7CE")
@@ -5253,6 +5354,29 @@ def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
             cell.fill, cell.font = fill_fail, font_fail
         else:
             cell.fill, cell.font = fill_skip, font_skip
+        # Second verdict, in its own column. A row can legitimately pass one
+        # layer and fail the other — a value the site publishes correctly in
+        # its data layer but the GA4 tag never forwards is a tag fix, not a
+        # site fix — and one combined verdict cannot express that.
+        dl = (r.get("dl_status") or "").upper()
+        if dl:
+            dlc = ws.cell(row, dl_col)
+            dlc.value = {"PASS": "Pass", "FAIL": "Fail"}.get(dl, "N/A")
+            if dl == "PASS":
+                dlc.fill, dlc.font = fill_pass, font_pass
+            elif dl == "FAIL":
+                dlc.fill, dlc.font = fill_fail, font_fail
+            else:
+                dlc.fill, dlc.font = fill_skip, font_skip
+            dlr = (r.get("dl_reason") or "").strip()
+            if dlr:
+                try:
+                    c2 = Comment(dlr[:1500], "Tag Validator")
+                    c2.width, c2.height = 420, 160
+                    dlc.comment = c2
+                except Exception:
+                    pass
+
         # The explanation rides along as a note so the columns stay untouched.
         if reason:
             try:
@@ -5267,8 +5391,10 @@ def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
         del wb[QA_DETAIL_SHEET]
     det = wb.create_sheet(QA_DETAIL_SHEET)
     headers = ["SDR Row", "Page URL", "Location", "Link/Button Name",
-               "Expected Event", "Actual Event", "GA4 Property", "Result",
-               "Why It Failed / Notes", "Parameter Differences",
+               "Expected Event", "Actual Event", "GA4 Property",
+               "Network QA (Omnibug)", "Why Network Failed / Notes",
+               "Data Layer QA", "Why Data Layer Failed",
+               "Parameter Differences", "Data Layer Differences",
                "All Events Fired", "Element Clicked", "Click Method",
                "Click Verified"]
     det.append(headers)
@@ -5285,6 +5411,10 @@ def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
             + (" [spacing only — passed]" if d.get("cosmetic") else "")
             for d in r.get("param_diff", []) if not d["match"] or d.get("cosmetic")
         )
+        dl_diffs = "; ".join(
+            f"{d['key']}: expected '{d['expected']}', got '{d['actual'] or '(absent)'}'"
+            for d in r.get("dl_diff", []) if not d["match"]
+        )
         det.append([
             r.get("excel_row"),
             r.get("page_url", ""),
@@ -5295,26 +5425,30 @@ def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
             r.get("measurement_id", "") or "-",
             {"PASS": "Pass", "FAIL": "Fail", "SKIPPED": "Not Tested"}.get(r.get("status"), r.get("status")),
             r.get("reason", "") or "",
+            {"PASS": "Pass", "FAIL": "Fail", "N/A": "N/A"}.get((r.get("dl_status") or "").upper(), "-"),
+            r.get("dl_reason", "") or "",
             diffs or "-",
+            dl_diffs or "-",
             ", ".join(r.get("fired_events", [])) or "-",
             r.get("matched_element", "") or "-",
             r.get("click_method", "") or "-",
             "Yes" if r.get("click_verified") else "No",
         ])
 
-    widths = [9, 42, 22, 32, 20, 20, 18, 11, 70, 60, 30, 34, 14, 13]
+    widths = [9, 40, 20, 30, 18, 18, 17, 15, 62, 13, 58, 52, 52, 26, 30, 13, 12]
     for i, w in enumerate(widths, start=1):
         det.column_dimensions[get_column_letter(i)].width = w
     for row in det.iter_rows(min_row=2, max_row=det.max_row):
-        row[8].alignment = Alignment(wrap_text=True, vertical="top")
-        row[9].alignment = Alignment(wrap_text=True, vertical="top")
-        v = row[7].value
-        if v == "Fail":
-            row[7].fill, row[7].font = fill_fail, font_fail
-        elif v == "Pass":
-            row[7].fill, row[7].font = fill_pass, font_pass
-        else:
-            row[7].fill, row[7].font = fill_skip, font_skip
+        for i in (8, 10, 11, 12):
+            row[i].alignment = Alignment(wrap_text=True, vertical="top")
+        for i in (7, 9):        # the two verdict columns
+            v = row[i].value
+            if v == "Fail":
+                row[i].fill, row[i].font = fill_fail, font_fail
+            elif v == "Pass":
+                row[i].fill, row[i].font = fill_pass, font_pass
+            else:
+                row[i].fill, row[i].font = fill_skip, font_skip
 
     wb.save(out_path)
     return out_path
