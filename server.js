@@ -188,7 +188,7 @@ app.post('/api/sdr/detect-ga4', (req, res) => {
 app.post('/api/sdr/run', (req, res) => {
     if (validatorProcess) return res.status(400).json({ error: 'Running' });
     if (!fs.existsSync(SDR_PATH)) return res.status(400).json({ error: 'Upload an SDR file first' });
-    const { sheet, ga4Id, startUrl, qaColumn } = req.body || {};
+    const { sheet, ga4Id, startUrl, qaColumn, resume } = req.body || {};
     if (!ga4Id) return res.status(400).json({ error: 'Select which GA4 measurement ID to validate against' });
 
     const args = ['-u', 'bulk_tag_validator.py', '--mode', 'sdr', '--sdr', SDR_PATH,
@@ -196,6 +196,12 @@ app.post('/api/sdr/run', (req, res) => {
     if (sheet) args.push('--sdr-sheet', sheet);
     if (startUrl) args.push('--start-url', startUrl);
     if (qaColumn) args.push('--qa-column', qaColumn);
+    // Continue an interrupted run rather than re-clicking hundreds of rows.
+    if (resume) args.push('--resume');
+    // A fresh run must not inherit the previous run's checkpoint.
+    if (!resume) {
+        try { fs.unlinkSync(path.join(__dirname, 'sdr_results.json')); } catch {}
+    }
 
     lastRunMode = 'sdr';
     cancelRequested = false;

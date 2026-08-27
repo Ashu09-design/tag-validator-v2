@@ -1579,7 +1579,7 @@ async function sdrDetectGa4() {
     sdrUpdateRunState();
 }
 
-async function sdrRun() {
+async function sdrRun(resume) {
     const sheet = sdrEl('sdrSheet').value;
     const ga4Id = sdrEl('sdrGa4Id').value;
     const qaColumn = sdrEl('sdrQaColumn').value;
@@ -1587,6 +1587,7 @@ async function sdrRun() {
     if (!ga4Id) { alert('Choose which GA4 measurement ID to validate against'); return; }
 
     sdrEl('sdrRunBtn').disabled = true;
+    sdrEl('sdrResumeBtn').classList.add('hidden');
     sdrEl('sdrCancelBtn').classList.remove('hidden');
     sdrEl('sdrDownloadFilled').classList.add('hidden');
     sdrEl('sdrDownloadReport').classList.add('hidden');
@@ -1596,7 +1597,8 @@ async function sdrRun() {
         const r = await fetch('/api/sdr/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sheet: sheet, ga4Id: ga4Id, qaColumn: qaColumn, startUrl: startUrl })
+            body: JSON.stringify({ sheet: sheet, ga4Id: ga4Id, qaColumn: qaColumn,
+                                   startUrl: startUrl, resume: !!resume })
         });
         const d = await r.json();
         if (!r.ok || d.error) {
@@ -1614,18 +1616,43 @@ async function sdrRun() {
     sdrPollTimer = setInterval(sdrPoll, 1500);
 }
 
+let sdrPollTick = 0;
+
 async function sdrPoll() {
     try {
         const d = await (await fetch('/api/tag-validator/status')).json();
         sdrSetLog(d.logs || []);
+        // Results are checkpointed after every page, so the table can fill in
+        // as the run proceeds instead of staying blank for half an hour.
+        if (++sdrPollTick % 6 === 0) await sdrLoadResults();
         if (!d.running) {
             clearInterval(sdrPollTimer);
             sdrPollTimer = null;
+            sdrPollTick = 0;
             sdrEl('sdrCancelBtn').classList.add('hidden');
             sdrUpdateRunState();
             await sdrLoadResults();
+            await sdrCheckResumable();
         }
     } catch (e) { /* keep polling */ }
+}
+
+// If a previous run stopped part-way, offer to continue it rather than
+// silently starting over — these runs are long and re-doing them is costly.
+async function sdrCheckResumable() {
+    try {
+        const d = await (await fetch('/api/sdr/results')).json();
+        const btn = sdrEl('sdrResumeBtn');
+        if (!btn) return;
+        const incomplete = d.partial && d.completed && d.total_cases
+                           && d.completed < d.total_cases;
+        if (incomplete) {
+            btn.textContent = `▶ Resume previous run (${d.completed}/${d.total_cases} done)`;
+            btn.classList.remove('hidden');
+        } else {
+            btn.classList.add('hidden');
+        }
+    } catch (e) { /* ignore */ }
 }
 
 async function sdrLoadResults() {
@@ -1648,7 +1675,9 @@ async function sdrLoadResults() {
         '<div style="font-size:1.5rem;font-weight:700;color:' + color + '">' + val + '</div></div>';
     const sum = sdrEl('sdrSummary');
     sum.classList.remove('hidden');
-    sum.innerHTML = tile('Pass', pass, '#4ade80') + tile('Fail', fail, '#f87171') +
+    const progressTile = (d.partial && d.total_cases && d.completed < d.total_cases)
+        ? tile('In progress', d.completed + '/' + d.total_cases, '#fbbf24') : '';
+    sum.innerHTML = progressTile + tile('Pass', pass, '#4ade80') + tile('Fail', fail, '#f87171') +
         tile('Not tested', skip, '#fbbf24') + tile('Total', rows.length, 'var(--text)') +
         (d.ga4_id ? tile('GA4 property',
             '<span style="font-size:0.85rem;font-family:monospace">' + escapeHtml(d.ga4_id) + '</span>',
@@ -1707,7 +1736,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const det = document.getElementById('sdrDetectBtn');
     if (det) det.addEventListener('click', sdrDetectGa4);
     const run = document.getElementById('sdrRunBtn');
-    if (run) run.addEventListener('click', sdrRun);
+    if (run) run.addEventListener('click', () => sdrRun(false));
+    const res = document.getElementById('sdrResumeBtn');
+    if (res) res.addEventListener('click', () => sdrRun(true));
     const sheetSel = document.getElementById('sdrSheet');
     if (sheetSel) sheetSel.addEventListener('change', sdrOnSheetChange);
     const idSel = document.getElementById('sdrGa4Id');
@@ -1722,6 +1753,15 @@ document.addEventListener('DOMContentLoaded', () => {
             sdrFillSheets(d.sheets);
             const st = document.getElementById('sdrFileState');
             if (st) st.innerHTML = 'Using the previously uploaded SDR — ' + d.sheets.length + ' sheet(s).';
+        }
+    }).catch(() => {});
+    sdrCheckResumable();
+    // A run may still be going from before this page was opened.
+    fetch('/api/tag-validator/status').then(r => r.json()).then(d => {
+        if (d.running) {
+            sdrEl('sdrCancelBtn').classList.remove('hidden');
+            sdrEl('sdrRunBtn').disabled = true;
+            if (!sdrPollTimer) sdrPollTimer = setInterval(sdrPoll, 1500);
         }
     }).catch(() => {});
 });

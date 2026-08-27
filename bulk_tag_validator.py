@@ -3885,7 +3885,11 @@ def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
         expected_params = {}
         for col, pname in param_cols.items():
             v = _sdr_clean(_sdr_cellv(grid, r, col))
-            if v:
+            # "<link url>", "<provider_name>" and friends are authoring
+            # placeholders meaning "whatever is right for this row", not a
+            # literal expected value. Comparing against them would fail every
+            # such row for no reason, so they are treated as unspecified.
+            if v and not re.fullmatch(r'<[^>]*>', v.strip()):
                 expected_params[pname] = v
 
         # "All Pages" / "Global" rows still need a concrete page to test on.
@@ -4025,14 +4029,22 @@ def _sdr_actual_value(params, pname):
 
 
 def _sdr_score_element(case, el, base_url=""):
-    """How well does a discovered element answer this SDR row? Higher is better.
+    """How well does a discovered element answer this SDR row?
 
-    The SDR identifies a target the way a human would — by the button's name,
-    its link URL and roughly where it sits on the page. Scoring all three
-    beats taking the first text match, which is how the wrong element used to
-    get clicked when a link appears in both the header and the footer.
+    Returns (total_score, text_score). The SDR identifies a target the way a
+    human would — by the button's name, its link URL and roughly where it sits
+    on the page — so all three are scored rather than taking the first text
+    match, which is how the wrong element used to get clicked when a link
+    appears in both the header and the footer.
+
+    text_score is reported separately because link URL alone is a weak
+    identifier: whole blocks of SDR rows share one destination (every FAQ
+    accordion row points at the FAQ page), and a URL-only match will happily
+    collapse all of them onto whichever element owns that href. The caller
+    uses text_score to prefer candidates whose label actually agrees.
     """
     score = 0
+    text_score = 0
     el_text = _norm_str(el.get('text'))
     el_href = el.get('href') or ''
     zone = (el.get('zone') or 'body').lower()
@@ -4046,14 +4058,49 @@ def _sdr_score_element(case, el, base_url=""):
         if _url_keys(want_url, base_url) & _url_keys(el_href, base_url):
             score += 10
 
-    for want in (case.get('link_text') or '', case.get('button_name') or ''):
+    def _tokens(v):
+        return {t for t in re.split(r'[^a-z0-9]+', _norm_str(v)) if len(t) > 2}
+
+    el_tokens = _tokens(el.get('text'))
+
+    def _agree(want):
+        """How strongly this element's label agrees with `want`."""
         w = _norm_str(want)
         if not w:
-            continue
-        if w == el_text:
-            score += 8
-        elif len(w) > 3 and (w in el_text or el_text in w):
-            score += 4
+            return 0
+        # Ignore trailing punctuation: SDRs write "What is it" for a heading
+        # rendered as "What is it?".
+        w_trim = w.rstrip('?!.:;')
+        el_trim = el_text.rstrip('?!.:;')
+        if w == el_text or w_trim == el_trim:
+            return 12
+        if len(w) > 3 and (w in el_text or el_text in w):
+            return 8
+        if True:
+            # Word overlap catches SDR typos, truncated names and labels the
+            # page prefixes ("Expand: How are lines formed?") — the row naming
+            # "How Much Resarch Has Gone Into Botox" should still find
+            # "How much research has gone into BOTOX Cosmetic?".
+            wt = _tokens(want)
+            if wt and el_tokens:
+                overlap = len(wt & el_tokens) / len(wt)
+                if overlap >= 0.8:
+                    return 9
+                if overlap >= 0.6:
+                    return 6
+                if overlap >= 0.45:
+                    return 3
+        return 0
+
+    # The Link/Button Name column is the row's own identity — it is what a
+    # person scans the page for. link_text is a parameter *value*, and in real
+    # sheets it is often copied from the row above and left unedited, so it is
+    # kept as a weaker, secondary signal rather than allowed to outvote the
+    # name and drag the match onto a different element.
+    name_score = _agree(case.get('button_name') or '')
+    ltext_score = _agree(case.get('link_text') or '')
+    text_score = max(name_score, ltext_score)
+    score += text_score
 
     loc = (case.get('location') or '').lower()
     if loc:
@@ -4067,11 +4114,13 @@ def _sdr_score_element(case, el, base_url=""):
     ctype = (case.get('click_type') or '').lower()
     if 'download' in ctype and el.get('is_download'):
         score += 3
-    return score
+    return score, text_score, name_score
 
 
 async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
-                       ga4_id="", ga4_mode="specific"):
+                       ga4_id="", ga4_mode="specific", resume=False,
+                       progress_path="sdr_results.json", qa_column="",
+                       filled_path="sdr_filled.xlsx"):
     """Automate a manual SDR QA pass.
 
     For every SDR row: open the page it names, find the button it names, click
@@ -4094,6 +4143,30 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
     if not cases:
         return {"meta": parsed, "results": []}
 
+    # ---- resume support ----
+    # These runs take tens of minutes. If one is interrupted — the server is
+    # restarted, the machine sleeps, someone hits Cancel — everything done so
+    # far used to be thrown away, because results were only written at the very
+    # end. Progress is now flushed after every page, and a new run can pick up
+    # where the last one stopped instead of re-clicking hundreds of elements.
+    done_by_row = {}
+    if resume and os.path.exists(progress_path):
+        try:
+            with open(progress_path, "r", encoding="utf-8") as f:
+                prev = json.load(f)
+            same = (prev.get("sheet") == parsed.get("sheet")
+                    and str(prev.get("ga4_id") or "") == str(ga4_id or ""))
+            if same:
+                for r in prev.get("results", []):
+                    if r.get("excel_row") and r.get("status") in ("PASS", "FAIL", "SKIPPED"):
+                        done_by_row[r["excel_row"]] = r
+        except Exception:
+            done_by_row = {}
+        if done_by_row:
+            sys.stdout.write(f"[SDR] Resuming — {len(done_by_row)} row(s) already validated, "
+                             f"{len(cases) - len(done_by_row)} to go\n")
+            sys.stdout.flush()
+
     # Group by page so each URL is loaded once.
     by_page, page_order = {}, []
     for c in cases:
@@ -4103,7 +4176,42 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             by_page[key] = []
         by_page[key].append(c)
 
-    results = []
+    results = [done_by_row[r] for r in sorted(done_by_row)] if done_by_row else []
+    detected_ids = set()
+
+    def _flush(partial=True):
+        """Persist what has been validated so far.
+
+        Written after every page so an interrupted run still leaves a usable
+        report behind, and so the UI can show progress mid-run.
+        """
+        try:
+            ordered = sorted(results, key=lambda r: r.get("excel_row") or 0)
+            payload = {
+                "generated": datetime.datetime.now().isoformat(),
+                "start_url": start_url,
+                "sheet": parsed.get("sheet", ""),
+                "ga4_id": ga4_id,
+                "detected_ga4_ids": sorted(detected_ids),
+                "partial": bool(partial),
+                "completed": len(ordered),
+                "total_cases": len(cases),
+                "results": ordered,
+            }
+            tmp = progress_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, default=str)
+            os.replace(tmp, progress_path)
+        except Exception:
+            pass
+        # Keep a downloadable workbook current as well, so an interrupted run
+        # still hands back a filled SDR and not just raw JSON.
+        try:
+            if ordered:
+                write_sdr_verdicts(sdr_path, parsed, ordered, filled_path,
+                                   qa_column=qa_column)
+        except Exception:
+            pass
 
     def _record(case, status, reason, extra=None):
         row = {
@@ -4178,10 +4286,12 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             pass
     cdp.on("Network.requestWillBeSent", on_cdp_req)
 
-    detected_ids = set()
-
     for page_url in page_order:
-        page_cases = by_page[page_url]
+        # Rows already validated by an earlier interrupted run stay as they are.
+        page_cases = [c for c in by_page[page_url]
+                      if c["excel_row"] not in done_by_row]
+        if not page_cases:
+            continue
 
         # SDR rows sometimes name a placeholder instead of a real page
         # ("<providers name page>"). Those cannot be opened, and calling them
@@ -4296,9 +4406,27 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         except Exception:
             pass
 
-        elements = list(discovered.values())
-        sys.stdout.write(f"[SDR]   {len(elements)} clickable elements available for matching\n")
+        # The menu-expansion sweep above found things that are not visible in
+        # the page's resting state; keep that as a fallback pool.
+        base_elements = list(discovered.values())
+        elements = base_elements
+        sys.stdout.write(f"[SDR]   {len(base_elements)} clickable elements available for matching\n")
         sys.stdout.flush()
+
+        async def _fresh_elements():
+            """Re-scan (and re-stamp) the page right before a click.
+
+            These pages re-render after every interaction — an accordion that
+            read "Expand: X" becomes "Collapse: X", React swaps nodes, and the
+            data-tvuid stamped minutes ago goes with them. Matching against a
+            list captured once at page load quietly drifts onto stale or wrong
+            elements, so the list is refreshed per row.
+            """
+            try:
+                batch = await page.evaluate(DISCOVER_CLICKABLES_JS)
+                return [b for b in (batch or []) if b.get("uid")]
+            except Exception:
+                return []
 
         for ci, case in enumerate(page_cases):
             label = (case.get("button_name") or case.get("link_text") or "")[:34]
@@ -4326,11 +4454,47 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 continue
 
             # --- locate the element this SDR row is about ---
-            best, best_score = None, 0
-            for el in elements:
-                sc = _sdr_score_element(case, el, page_url)
-                if sc > best_score:
-                    best, best_score = el, sc
+            # Two passes. If ANY element's label agrees with the row's name,
+            # only those are considered; a link URL on its own is too weak to
+            # pick between rows that all point at the same destination. Only
+            # when nothing matches by label (icon buttons, logos, image links)
+            # does a URL-only match get to win.
+            # Match against the page as it is NOW, not as it was before the
+            # previous row's click re-rendered it.
+            fresh = await _fresh_elements()
+            elements = fresh or base_elements
+
+            def _score_all(cands):
+                out = []
+                for e in cands:
+                    sc, tsc, nsc = _sdr_score_element(case, e, page_url)
+                    if sc > 0:
+                        out.append((sc, tsc, nsc, e))
+                return out
+
+            def _pick_best(cands):
+                # Only a STRONG label match counts as agreement — exact, a
+                # substring, or near-total word overlap. Anything weaker is
+                # coincidence: "Expand All" shares "all" with "View All FAQs",
+                # and "Botox Logo" shares "botox" with "About BOTOX Cosmetic".
+                # Promoting those into the tier would let a coincidental word
+                # beat the element the row's link URL actually points at.
+                by_name = [x for x in cands if x[2] >= 8]
+                by_text = [x for x in cands if x[1] >= 8]
+                pool = by_name or by_text or cands
+                b, bs = None, 0
+                for sc, tsc, nsc, e in pool:
+                    if sc > bs:
+                        b, bs = e, sc
+                return b, bs
+
+            best, best_score = _pick_best(_score_all(elements))
+            # Hidden targets (collapsed sub-menu links) only exist in the pool
+            # captured while the menus were forced open.
+            if (best is None or best_score < 4) and elements is not base_elements:
+                b2, bs2 = _pick_best(_score_all(base_elements))
+                if bs2 > best_score:
+                    best, best_score = b2, bs2
             if best is None or best_score < 4:
                 _record(case, "FAIL",
                         f"Element not found on page (looked for name '{case.get('button_name')}'"
@@ -4564,7 +4728,26 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                                 reasons.append(
                                     f"{pname}: expected '{pexp}' but never sent by the site")
                         else:
-                            reasons.append(f"{pname}: expected '{pexp}' but got '{pact}'")
+                            note = ""
+                            # When the value the site sent matches THIS row's
+                            # own button name but the SDR's expected value does
+                            # not, the sheet is almost certainly wrong — these
+                            # templates are filled by copying a row and the
+                            # text field gets left behind. Saying so turns an
+                            # unexplained failure into a one-line sheet fix.
+                            if pname in ("link_text", "link_url"):
+                                own = _norm_str(case.get("button_name"))
+                                def _tk(v):
+                                    return {t for t in re.split(r'[^a-z0-9]+', _norm_str(v)) if len(t) > 2}
+                                a_t, o_t, e_t = _tk(pact), _tk(own), _tk(pexp)
+                                if o_t:
+                                    a_fit = len(a_t & o_t) / len(o_t)
+                                    e_fit = len(e_t & o_t) / len(o_t)
+                                    if a_fit >= 0.8 and e_fit < 0.5:
+                                        note = (" — note: what fired matches this row's own"
+                                                " Link/Button Name, so the SDR's expected value"
+                                                " looks copied from another row")
+                            reasons.append(f"{pname}: expected '{pexp}' but got '{pact}'{note}")
 
             status = "PASS" if not reasons else "FAIL"
             if status == "PASS" and not verified:
@@ -4613,6 +4796,10 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             except Exception:
                 pass
 
+        # One page done — checkpoint before moving to the next.
+        _flush(partial=True)
+
+    _flush(partial=False)
     try:
         await context.close()
     except Exception:
@@ -4749,6 +4936,8 @@ async def main():
                         help="'specific' = only the chosen GA4 property counts; 'any' = any property")
     parser.add_argument("--qa-column", dest="qa_column",
                         help="Which QA column to fill in the SDR (e.g. 'Live/Prod QA')")
+    parser.add_argument("--resume", dest="resume", action="store_true",
+                        help="Continue a previous SDR run instead of re-testing rows already done")
     parser.add_argument("--list-sdr-sheets", dest="list_sdr_sheets_path",
                         help="Print the sheets in an SDR workbook as JSON, then exit")
     args = parser.parse_args()
@@ -4798,7 +4987,9 @@ async def main():
                 args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
             sdr_out = await validate_sdr(browser, sdr_path, start_url,
                                          sheet_name=sheet_name,
-                                         ga4_id=ga4_id, ga4_mode=ga4_mode)
+                                         ga4_id=ga4_id, ga4_mode=ga4_mode,
+                                         resume=bool(getattr(args, 'resume', False)),
+                                         qa_column=(getattr(args, 'qa_column', '') or ''))
             await browser.close()
 
         meta = sdr_out.get("meta", {})
@@ -4844,6 +5035,9 @@ async def main():
                        "ga4_id": sdr_out.get("ga4_id", ""),
                        "detected_ga4_ids": sdr_out.get("detected_ga4_ids", []),
                        "failure_patterns": patterns,
+                       "partial": False,
+                       "completed": len(results),
+                       "total_cases": len(results),
                        "results": results}, f, indent=2, default=str)
 
         # 1) Flat report — one row per SDR case, with the reason spelled out.
