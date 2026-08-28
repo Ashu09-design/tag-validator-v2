@@ -1599,11 +1599,34 @@ DISCOVER_CLICKABLES_JS = r"""
                 }
             } catch (e) {}
 
+            // Where the element lives, in the page's own words. `zone` only
+            // knows header / footer / body, but SDRs name regions the way the
+            // build does — "isi", "hero", "submenu", "footer_promo". The same
+            // link often appears in two of them (a Directions for Use in the
+            // nav and another inside the ISI block) and the region is the only
+            // thing telling those rows apart, so carry the id/class words of
+            // every ancestor and let matching compare against them.
+            const hints = [];
+            try {
+                let n = el, hops = 0;
+                while (n && n !== document.body && hops < 10) {
+                    const bag = ((n.id || '') + ' ' +
+                                 (typeof n.className === 'string' ? n.className : '')).toLowerCase();
+                    bag.split(/[^a-z0-9]+/).forEach(tok => {
+                        if (tok.length >= 2 && tok.length <= 24 && !hints.includes(tok)) {
+                            hints.push(tok);
+                        }
+                    });
+                    n = n.parentElement; hops++;
+                }
+            } catch (e) {}
+
             results.push({
                 selector: buildSelector(el),
                 uid: uid,
                 context: context,
                 labels: labels,
+                hints: hints.slice(0, 40),
                 tag: el.tagName,
                 text: text || `[${el.tagName.toLowerCase()}]`,
                 href: href,
@@ -3479,9 +3502,12 @@ async def validate_clicks(browser, url, index, total):
             # shows up as a run of unverified clicks with no tracking. Escape
             # closes most overlays; anything this reopens is discarded by the
             # drain at the start of the next element.
+            # A consent link opens a panel that would cover the page for every
+            # row after it, so dismiss it here rather than refusing to test it.
             try:
                 await page.keyboard.press("Escape")
                 await asyncio.sleep(0.15)
+                await page.evaluate(CLOSE_CONSENT_UI_JS)
             except Exception:
                 pass
 
@@ -4148,6 +4174,22 @@ def _sdr_region(case):
     return ''
 
 
+def _sdr_el_in_region(el, region):
+    """Is this element in the region the sheet named?
+
+    `zone` only distinguishes header, footer and body, but a page names its own
+    areas — an ISI block, a hero, a promo strip. The sheet uses those names, so
+    the element's ancestor id/class words are consulted too. Without this, the
+    Directions for Use link inside the ISI (which reports file_location
+    "footer") cannot be told apart from the one in the nav.
+    """
+    if not region:
+        return True
+    if (el.get('zone') or 'body') == region:
+        return True
+    return region in (el.get('hints') or [])
+
+
 def _sdr_location_detail(case):
     """The specific part of an SDR Location, minus the page region.
 
@@ -4318,6 +4360,14 @@ def _sdr_score_element(case, el, base_url=""):
     # the only thing that tells them apart, so compare it against the
     # element's enclosing heading.
     loc_detail = _sdr_location_detail(case)
+    # The Location column often names the page area in the build's own words
+    # ("isi", "footer_promo", "hero"). Those words are in the markup, so match
+    # them against it directly.
+    if loc_raw_words := {w for w in re.split(r'[^a-z0-9]+', (case.get('location') or '').lower())
+                         if len(w) >= 3}:
+        if loc_raw_words & set(el.get('hints') or []):
+            score += 6
+
     if loc_detail and len(loc_detail) > 3:
         ctx = _sdr_label_norm(el.get('context'))
         if ctx:
@@ -4768,12 +4818,11 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> NOT A CLICK (skipped)\n")
                 sys.stdout.flush()
                 continue
-            if any(k in _blob for k in ("cookie", "consent", "onetrust", "privacy choices")):
-                _record(case, "SKIPPED",
-                        "Consent/cookie UI is excluded from the audit by design")
-                sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> CONSENT UI (skipped)\n")
-                sys.stdout.flush()
-                continue
+            # Consent links ("Cookie Settings", "Your Privacy Choices") used to
+            # be refused here. They are ordinary tracked links and the sheet
+            # expects them to fire, so they are tested like any other row; the
+            # panel they open is dismissed afterwards so it cannot cover the
+            # rows that follow.
 
             # --- locate the element this SDR row is about ---
             # Two passes. If ANY element's label agrees with the row's name,
@@ -4810,7 +4859,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 # row as missing.
                 if want_region:
                     in_region = [x for x in cands
-                                 if (x[3].get('zone') or 'body') == want_region and x[2] > 0]
+                                 if _sdr_el_in_region(x[3], want_region) and x[2] > 0]
                     if in_region:
                         cands = in_region
                 # Only a STRONG label match counts as agreement — exact, a
@@ -4833,7 +4882,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 reg = _sdr_region(case)
                 if reg:
                     in_reg = [x for x in cands
-                              if (x[3].get('zone') or 'body') == reg and x[2] > 0]
+                              if _sdr_el_in_region(x[3], reg) and x[2] > 0]
                     if in_reg:
                         cands = in_reg
                 by_name = [x for x in cands if x[2] >= 8]
@@ -4912,6 +4961,38 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     if not await loc_el.is_visible(timeout=400):
                         await page.evaluate(EXPOSE_HIDDEN_JS)
                         await asyncio.sleep(0.35)
+                    if not await loc_el.is_visible(timeout=300):
+                        # Still hidden: it sits inside something collapsed —
+                        # an ISI tray, an accordion, a closed sub-menu. Open
+                        # the ancestors that own it. Without this the click
+                        # lands on a node the page is not showing, no handler
+                        # runs, and the row is judged on whatever the next
+                        # candidate happens to fire.
+                        await loc_el.evaluate("""e => {
+                            let node = e;
+                            const toOpen = [];
+                            while (node && node !== document.body) {
+                                node = node.parentElement;
+                                if (!node) break;
+                                const expanded = node.getAttribute('aria-expanded');
+                                const hasPopup = node.getAttribute('aria-haspopup');
+                                const cls = (typeof node.className === 'string' ? node.className : '').toLowerCase();
+                                if (expanded === 'false' || hasPopup
+                                        || /isi|accordion|collapse|drawer|tray/.test(cls)) {
+                                    toOpen.unshift(node);
+                                }
+                            }
+                            for (const p of toOpen) {
+                                const trig = p.querySelector(
+                                    ':scope > button, :scope > a, :scope > [role="button"], button');
+                                const t = trig || p;
+                                try {
+                                    t.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}));
+                                    t.click();
+                                } catch (err) {}
+                            }
+                        }""")
+                        await asyncio.sleep(0.6)
                 except Exception:
                     pass
                 try:
@@ -5025,6 +5106,47 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     if time.time() - last_change >= quiet:
                         break
                 current_cid["v"] = -1
+
+                # A click that produced nothing at all, made by dispatching on
+                # the node rather than through the browser's input pipeline,
+                # is usually not a real "nothing" — tag managers hang their
+                # link triggers off trusted events, so an untrusted click runs
+                # GA4's own auto-events and none of the site's. Scroll it to
+                # the middle of the viewport, where nothing sticky overlaps,
+                # and try once more for real before believing the result.
+                def _fired_expected():
+                    want = _norm_str(case["expected_event"])
+                    for r in all_requests[bookmark:]:
+                        if '/g/collect' not in r["url"]:
+                            continue
+                        for ev in parse_ga4_event(r["url"], r["post"]):
+                            if _norm_str(ev.get("event")) == want:
+                                return True
+                    return False
+
+                if (not _fired_expected()
+                        and click_method and 'cdp-click' not in click_method):
+                    try:
+                        await loc_el.evaluate(
+                            "e => e.scrollIntoView({block: 'center', inline: 'center'})")
+                        await asyncio.sleep(0.5)
+                        retry_hit = await loc_el.evaluate(PIERCE_OVERLAY_JS)
+                        if retry_hit and retry_hit.get("ok"):
+                            for t in ("mouseMoved", "mousePressed", "mouseReleased"):
+                                args = {"type": t, "x": retry_hit["x"], "y": retry_hit["y"]}
+                                if t != "mouseMoved":
+                                    args.update({"button": "left", "clickCount": 1})
+                                await cdp.send("Input.dispatchMouseEvent", args)
+                                if t == "mousePressed":
+                                    await asyncio.sleep(0.05)
+                            click_method += "+cdp-retry"
+                            await asyncio.sleep(SDR_MIN_BEACON_WAIT)
+                        try:
+                            await page.evaluate(RESTORE_OVERLAY_JS)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
 
                 window_reqs = all_requests[bookmark:]
                 try:
@@ -5154,6 +5276,16 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     prefix = "Passed with notes — " if status == "PASS" else "Also (not counted as failure) — "
                     reasons.append(prefix + "; ".join(notes))
 
+                if os.environ.get("TV_DEBUG_CAND"):
+                    sys.stdout.write(
+                        "      CAND[%d] zone=%s hints=%s -> event=%r params_ok=%d/%d" % (
+                            _cand_i, best.get('zone'),
+                            [h for h in (best.get('hints') or [])
+                             if h in ('isi', 'header', 'footer', 'nav', 'sticky')],
+                            (matched or {}).get('event'),
+                            sum(1 for d in param_diff if d["match"]), len(param_diff))
+                        + os.linesep)
+                    sys.stdout.flush()
                 attempts.append({
                     # Rank by: did the expected event fire, then how many of
                     # the row's parameters agreed. The candidate that best
