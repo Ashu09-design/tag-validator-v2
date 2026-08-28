@@ -67,12 +67,17 @@ class _StealthCompat:
                 await self._legacy(page)
             elif _stealth_async_fn is not None and not self._warned:
                 self._warned = True
-                sys.stderr.write(
-                    "[WARN] playwright-stealth 1.x detected and skipped: it breaks "
-                    "page JS (GTM/dataLayer) and would corrupt the audit. "
-                    "Install playwright-stealth>=2.0.0 for stealth support, or set "
-                    "TV_FORCE_STEALTH=1 to use 1.x anyway." + os.linesep)
-                sys.stderr.flush()
+                # Deliberately on stdout, not stderr: nothing has gone wrong.
+                # The run is fine — better than fine, since 1.x is what used to
+                # break it. Emitting this on stderr made the UI label a routine
+                # note as "ERROR" and sent people looking for a fault.
+                sys.stdout.write(
+                    "[NOTE] Bot-evasion (playwright-stealth 1.x) is not being used: "
+                    "that version injects broken JS that stops GTM initialising, "
+                    "which would make a fully tagged page look untracked. The audit "
+                    "runs normally without it. To enable it, install "
+                    "playwright-stealth>=2.0.0." + os.linesep)
+                sys.stdout.flush()
         except Exception:
             # Stealth is a nice-to-have for bot detection, never a hard
             # dependency of the audit itself.
