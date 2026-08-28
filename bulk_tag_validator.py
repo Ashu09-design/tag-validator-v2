@@ -1607,6 +1607,23 @@ DISCOVER_CLICKABLES_JS = r"""
             // thing telling those rows apart, so carry the id/class words of
             // every ancestor and let matching compare against them.
             const hints = [];
+            // An icon-only control is named by its icon. The back-to-top
+            // button renders as "Back to top" but contains <g id="arrow">,
+            // and the sheet calls that row "Arrow" — nothing in the rendered
+            // label connects the two. Take the id/class words from inside the
+            // control as well as from its ancestors.
+            try {
+                el.querySelectorAll('svg, g, path, use, i, span, img').forEach(k => {
+                    const bag = ((k.id || '') + ' ' +
+                                 (typeof k.className === 'string' ? k.className : '') + ' ' +
+                                 (k.getAttribute('data-icon') || '')).toLowerCase();
+                    bag.split(/[^a-z0-9]+/).forEach(tok => {
+                        if (tok.length >= 3 && tok.length <= 24 && !hints.includes(tok)) {
+                            hints.push(tok);
+                        }
+                    });
+                });
+            } catch (e) {}
             try {
                 let n = el, hops = 0;
                 while (n && n !== document.body && hops < 10) {
@@ -4353,6 +4370,21 @@ def _sdr_score_element(case, el, base_url=""):
     # name and drag the match onto a different element.
     name_score = _agree(case.get('button_name') or '')
     ltext_score = _agree(case.get('link_text') or '')
+
+    # Icon-only controls carry no usable label, so let a distinctive word from
+    # the sheet match the icon's own name in the markup. Generic words are
+    # excluded — every button contains something called "button" or "icon".
+    if max(name_score, ltext_score) < 8:
+        generic = {'button', 'link', 'icon', 'text', 'item', 'wrapper', 'inner',
+                   'outer', 'content', 'container', 'element', 'component',
+                   'cmp', 'emu', 'aaaem', 'svg', 'img', 'image', 'span', 'div'}
+        el_hints = set(el.get('hints') or [])
+        for want in (case.get('button_name') or '', case.get('link_text') or ''):
+            words = {w for w in re.split(r'[^a-z0-9]+', _norm_str(want))
+                     if len(w) >= 4 and w not in generic}
+            if words and words <= el_hints:
+                name_score = max(name_score, 9)
+                break
     text_score = max(name_score, ltext_score)
     score += text_score
 
@@ -5070,6 +5102,24 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     pass
                 el_res_blocked = ((hit or {}).get("blocker")
                                   or ("ok" if (hit or {}).get("ok") else "?"))
+                # A control with no box at all is not broken — some only
+                # materialise at a certain scroll position. The back-to-top
+                # arrow is display:none until the page has moved, so at the
+                # top of the page it measures zero and cannot be clicked.
+                # Move down the page and look again before giving up on it.
+                if hit and not hit.get("ok") and hit.get("reason") == "no-box":
+                    for depth in (900, 2000, 4000):
+                        try:
+                            await page.evaluate("window.scrollTo(0, %d)" % depth)
+                            await asyncio.sleep(0.7)
+                            hit = await loc_el.evaluate(PIERCE_OVERLAY_JS)
+                            if hit and hit.get("ok"):
+                                break
+                        except Exception:
+                            break
+                    el_res_blocked = ((hit or {}).get("reason")
+                                      or ("ok" if (hit or {}).get("ok") else "?"))
+
                 # Nothing at all at the element's centre means it is not
                 # really on screen, however "visible" it reports as — the ISI
                 # links sit inside a tray that is scrolled or collapsed, so
