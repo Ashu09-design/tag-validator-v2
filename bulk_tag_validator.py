@@ -1570,10 +1570,40 @@ DISCOVER_CLICKABLES_JS = r"""
                 }
             } catch (e) {}
 
+            // One control answers to several names. A footer logo may render
+            // as an aria-label ("Navigate to Skinvive Home Page") while the
+            // SDR calls it by its image alt ("SKINVIVE BY JUVEDERM Logo").
+            // Picking one and discarding the rest means the row cannot find
+            // its own element, so keep every name the markup offers and let
+            // matching try them all.
+            const labels = [];
+            const addLabel = (v) => {
+                const t = (v || '').replace(/\s+/g, ' ').trim();
+                if (t && t.length <= 90 && !labels.includes(t)) labels.push(t);
+            };
+            try {
+                addLabel(el.innerText);
+                addLabel(el.getAttribute('aria-label'));
+                addLabel(el.getAttribute('title'));
+                addLabel(el.getAttribute('alt'));
+                addLabel(el.getAttribute('data-selector-text'));
+                addLabel(attrUp(['data-title']));
+                const im = el.querySelector && el.querySelector('img');
+                if (im) { addLabel(im.getAttribute('alt')); addLabel(im.getAttribute('title')); }
+                const sv = el.querySelector && el.querySelector('svg title');
+                if (sv) addLabel(sv.textContent);
+                const inner = el.querySelector && el.querySelector('[aria-label],[alt]');
+                if (inner) {
+                    addLabel(inner.getAttribute('aria-label'));
+                    addLabel(inner.getAttribute('alt'));
+                }
+            } catch (e) {}
+
             results.push({
                 selector: buildSelector(el),
                 uid: uid,
                 context: context,
+                labels: labels,
                 tag: el.tagName,
                 text: text || `[${el.tagName.toLowerCase()}]`,
                 href: href,
@@ -4083,6 +4113,29 @@ def _sdr_element_fp(e):
     )
 
 
+def _sdr_region(case):
+    """The page region the SDR pins this row to, if it names one.
+
+    Two things can say it: the Location column, and an expected parameter such
+    as link_location or file_location. When a sheet has a header row and a
+    footer row for the very same control — same name, same link, same text —
+    this is the only thing that tells them apart, so it is treated as binding
+    rather than as a mild preference.
+    """
+    parts = [str(case.get('location') or '')]
+    for k in ('link_location', 'file_location', 'event_type', 'section'):
+        v = (case.get('expected_params') or {}).get(k)
+        if isinstance(v, str):
+            parts.append(v)
+    blob = ' '.join(parts).lower()
+    # Check footer first: "footer nav" contains both words.
+    if 'footer' in blob:
+        return 'footer'
+    if 'header' in blob or 'menu' in blob or re.search(r'nav', blob):
+        return 'header'
+    return ''
+
+
 def _sdr_location_detail(case):
     """The specific part of an SDR Location, minus the page region.
 
@@ -4106,6 +4159,31 @@ def _sdr_cosmetic_key(v):
     s = re.sub(r'[_\-–—/\\.:;,!?\'"“”‘’()\[\]]+', ' ', s)
     s = re.sub(r'\s+', ' ', s)
     return s.strip()
+
+
+def _sdr_url_host_only_diff(expected, actual):
+    """True when two urls are the same path on different hosts.
+
+    SDRs are often written while a site is on a staging host and the URLs are
+    not rewritten for launch, so a sheet says hcpskinvive-dev.pdcoe.dev where
+    the live tag reports hcp.skinvivebyjuvederm.com. This still FAILS — a URL
+    that does not match is a real defect — but the reason says the difference
+    is only the host, which points straight at the fix.
+    """
+    def split(u):
+        u = str(u or '').strip()
+        if not u:
+            return None
+        m = re.match(r'^https?://([^/?#]+)(.*)$', u, re.I)
+        if not m:
+            return None
+        host = m.group(1).lower().lstrip('www.')
+        rest = (m.group(2) or '/').rstrip('/') or '/'
+        return host, rest
+    a, b = split(expected), split(actual)
+    if not a or not b:
+        return False
+    return a[0] != b[0] and a[1] == b[1]
 
 
 def _sdr_cosmetic_match(expected, actual):
@@ -4153,6 +4231,7 @@ def _sdr_score_element(case, el, base_url=""):
     score = 0
     text_score = 0
     el_text = _norm_str(el.get('text'))
+    _ = el_text
     el_href = el.get('href') or ''
     zone = (el.get('zone') or 'body').lower()
 
@@ -4168,19 +4247,30 @@ def _sdr_score_element(case, el, base_url=""):
     def _tokens(v):
         return {t for t in re.split(r'[^a-z0-9]+', _sdr_label_norm(v)) if len(t) > 2}
 
-    el_label = _sdr_label_norm(el.get('text'))
-    el_tokens = _tokens(el.get('text'))
+    # Every name this control answers to, not just the one rendered.
+    el_label_list = [l for l in (el.get('labels') or []) if l]
+    if el.get('text') and el['text'] not in el_label_list:
+        el_label_list.insert(0, el['text'])
+    if not el_label_list:
+        el_label_list = ['']
 
     def _agree(want):
-        """How strongly this element's label agrees with `want`."""
+        """Best agreement between `want` and any name this element carries."""
         w = _sdr_label_norm(want)
         if not w:
+            return 0
+        return max(_agree_one(w, lbl) for lbl in el_label_list)
+
+    def _agree_one(w, raw_label):
+        el_label = _sdr_label_norm(raw_label)
+        el_tokens = _tokens(raw_label)
+        if not el_label:
             return 0
         # Ignore trailing punctuation: SDRs write "What is it" for a heading
         # rendered as "What is it?".
         w_trim = w.rstrip('?!.:;')
         el_trim = el_label.rstrip('?!.:;')
-        el_text = el_label   # compare on the normalised label
+        el_text = el_label
         if w == el_text or w_trim == el_trim:
             return 12
         if len(w) > 3 and (w in el_text or el_text in w):
@@ -4190,7 +4280,7 @@ def _sdr_score_element(case, el, base_url=""):
             # page prefixes ("Expand: How are lines formed?") — the row naming
             # "How Much Resarch Has Gone Into Botox" should still find
             # "How much research has gone into BOTOX Cosmetic?".
-            wt = _tokens(want)
+            wt = _tokens(w)
             if wt and el_tokens:
                 overlap = len(wt & el_tokens) / len(wt)
                 if overlap >= 0.8:
@@ -4692,7 +4782,19 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                         out.append((sc, tsc, nsc, e))
                 return out
 
+            want_region = _sdr_region(case)
+
             def _pick_best(cands):
+                # When the sheet pins the row to a region, a same-named control
+                # in a different region is simply not what the row is about.
+                # The Skinvive logo sits in both the header and the footer with
+                # identical text and link; without this the header one wins
+                # every time and the footer row is judged against it.
+                if want_region:
+                    in_region = [x for x in cands
+                                 if (x[3].get('zone') or 'body') == want_region]
+                    if in_region:
+                        cands = in_region
                 # Only a STRONG label match counts as agreement — exact, a
                 # substring, or near-total word overlap. Anything weaker is
                 # coincidence: "Expand All" shares "all" with "View All FAQs",
@@ -4710,6 +4812,11 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
 
             def _ordered(cands):
                 """Best-first, but only within the tier that actually agrees."""
+                reg = _sdr_region(case)
+                if reg:
+                    in_reg = [x for x in cands if (x[3].get('zone') or 'body') == reg]
+                    if in_reg:
+                        cands = in_reg
                 by_name = [x for x in cands if x[2] >= 8]
                 by_text = [x for x in cands if x[1] >= 8]
                 pool = by_name or by_text or cands
@@ -4964,6 +5071,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                             cosmetic = True
                             notes.append(f"{pname}: SDR says '{pexp}', site sends '{pact}' "
                                          f"(spacing/punctuation only)")
+
                         param_diff.append({"param": pname, "expected": pexp,
                                            "actual": "" if pact is None else str(pact),
                                            "match": ok, "cosmetic": cosmetic})
@@ -5004,7 +5112,16 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                                             note = (" — note: what fired matches this row's own"
                                                     " Link/Button Name, so the SDR's expected value"
                                                     " looks copied from another row")
-                                reasons.append(f"{pname}: expected '{pexp}' but got '{pact}'{note}")
+                                # A URL that does not match is a failure. Saying
+                                # that only the host differs points straight at
+                                # the fix: the sheet was written against another
+                                # environment and never updated.
+                                if (pname in ("link_url", "page_location", "file_location")
+                                        and _sdr_url_host_only_diff(pexp, pact)):
+                                    note += (" — only the host differs, so the SDR still points"
+                                             " at a different environment than the page tested")
+                                reasons.append(
+                                    f"{pname}: expected '{pexp}' but got '{pact}'{note}")
 
                 status = "PASS" if not reasons else "FAIL"
                 if status == "PASS" and not verified:
