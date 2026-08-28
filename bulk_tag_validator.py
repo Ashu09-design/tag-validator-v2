@@ -4047,6 +4047,18 @@ async def _find_sdr_target(page, link_text, link_url):
     return None
 
 
+def _sdr_show(v):
+    """Collapse a captured value for display.
+
+    Sites sometimes send a parameter with the source markup's newlines and
+    indentation still in it. Printing that raw turns one line of a report into
+    ten. The value is only tidied for reading — comparison always uses the
+    real one.
+    """
+    s = re.sub(r'\s+', ' ', str(v if v is not None else '')).strip()
+    return s if len(s) <= 160 else s[:157] + '...'
+
+
 def _sdr_param_matches(pname, expected, actual, base_url=""):
     """Compare one expected SDR parameter against what actually fired.
 
@@ -4790,9 +4802,15 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 # The Skinvive logo sits in both the header and the footer with
                 # identical text and link; without this the header one wins
                 # every time and the footer row is judged against it.
+                # ...but only when that region actually holds something that
+                # answers to the row's name. A Location like
+                # "header - more from allergan aesthetics" describes a menu
+                # whose links the page renders in the body; binding on the word
+                # "header" alone would throw the real links away and report the
+                # row as missing.
                 if want_region:
                     in_region = [x for x in cands
-                                 if (x[3].get('zone') or 'body') == want_region]
+                                 if (x[3].get('zone') or 'body') == want_region and x[2] > 0]
                     if in_region:
                         cands = in_region
                 # Only a STRONG label match counts as agreement — exact, a
@@ -4814,7 +4832,8 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 """Best-first, but only within the tier that actually agrees."""
                 reg = _sdr_region(case)
                 if reg:
-                    in_reg = [x for x in cands if (x[3].get('zone') or 'body') == reg]
+                    in_reg = [x for x in cands
+                              if (x[3].get('zone') or 'body') == reg and x[2] > 0]
                     if in_reg:
                         cands = in_reg
                 by_name = [x for x in cands if x[2] >= 8]
@@ -5069,8 +5088,8 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                             # Same value, written differently. Counts as a pass.
                             ok = True
                             cosmetic = True
-                            notes.append(f"{pname}: SDR says '{pexp}', site sends '{pact}' "
-                                         f"(spacing/punctuation only)")
+                            notes.append(f"{pname}: SDR says '{pexp}', site sends "
+                                         f"'{_sdr_show(pact)}' (spacing/punctuation only)")
 
                         param_diff.append({"param": pname, "expected": pexp,
                                            "actual": "" if pact is None else str(pact),
@@ -5121,7 +5140,8 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                                     note += (" — only the host differs, so the SDR still points"
                                              " at a different environment than the page tested")
                                 reasons.append(
-                                    f"{pname}: expected '{pexp}' but got '{pact}'{note}")
+                                    f"{pname}: expected '{pexp}' but got "
+                                    f"'{_sdr_show(pact)}'{note}")
 
                 status = "PASS" if not reasons else "FAIL"
                 if status == "PASS" and not verified:
