@@ -3242,6 +3242,7 @@ async def validate_clicks(browser, url, index, total):
                         }""")
                     except Exception:
                         pass
+                    el_res_blocked = (hit or {}).get("blocker") or (hit or {}).get("reason") or ""
                     if hit and not hit.get("ok") and hit.get("blocker"):
                         el_res["blocked_by"] = hit["blocker"]
 
@@ -4995,8 +4996,45 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                         await asyncio.sleep(0.6)
                 except Exception:
                     pass
+                # Clear any consent panel before EVERY click, not only when a
+                # hit-test has already failed. OneTrust's preference centre
+                # lays a full-page dark filter over everything, and Playwright
+                # reports exactly that: "onetrust-pc-dark-filter ... intercepts
+                # pointer events". While it is up, no real click can land, so
+                # the audit falls back to dispatching on the node — which the
+                # tag manager's link triggers ignore, and the row is recorded
+                # as firing nothing. Testing the consent links themselves
+                # makes this panel appear far more often, so it is closed on
+                # the way in to every row.
+                try:
+                    await page.evaluate(CLOSE_CONSENT_UI_JS)
+                except Exception:
+                    pass
+                # Put the element in the MIDDLE of the viewport, not merely
+                # somewhere in it. Sticky headers and pinned ISI banners live
+                # at the top and bottom edges, and "scroll into view" happily
+                # leaves an element underneath one of them — Playwright's own
+                # words on this page: "aaaem-isi-banner subtree intercepts
+                # pointer events". The centre is the one band nothing pins
+                # itself to.
                 try:
                     await loc_el.scroll_into_view_if_needed(timeout=2500)
+                    # scrollIntoView scrolls the nearest scrollable ancestor,
+                    # which for content inside an ISI tray is that tray and not
+                    # the window — the element ends up perfectly centred inside
+                    # a box that is itself off-screen, and elementFromPoint at
+                    # its centre returns null. Move the window itself until the
+                    # element really is in the middle of the viewport, away
+                    # from the sticky bars pinned to the top and bottom edges.
+                    await loc_el.evaluate("""e => {
+                        e.scrollIntoView({block: 'center', inline: 'center'});
+                        for (let i = 0; i < 3; i++) {
+                            const r = e.getBoundingClientRect();
+                            const mid = r.top + r.height / 2;
+                            if (mid > innerHeight * 0.3 && mid < innerHeight * 0.7) break;
+                            window.scrollBy(0, mid - innerHeight / 2);
+                        }
+                    }""")
                 except Exception:
                     pass
                 await asyncio.sleep(0.6)
@@ -5024,10 +5062,47 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                             const t = document.elementFromPoint(x, y);
                             if (t && (t === e || e.contains(t) || t.contains(e))) return {ok: true, x, y};
                         }
-                        return {ok: false};
+                        const t0 = document.elementFromPoint(r.x + r.width/2, r.y + r.height/2);
+                        return {ok: false,
+                                blocker: t0 ? (t0.tagName + '.' + String(t0.className || '').slice(0,44)) : 'null'};
                     }""")
                 except Exception:
                     pass
+                el_res_blocked = ((hit or {}).get("blocker")
+                                  or ("ok" if (hit or {}).get("ok") else "?"))
+                # Nothing at all at the element's centre means it is not
+                # really on screen, however "visible" it reports as — the ISI
+                # links sit inside a tray that is scrolled or collapsed, so
+                # their rect lands outside the viewport entirely. Opening the
+                # tray puts them where a person would see them.
+                if hit and not hit.get("ok") and str(hit.get("blocker")) in ("null", "None", ""):
+                    try:
+                        await loc_el.evaluate("""e => {
+                            let n = e;
+                            while (n && n !== document.body) {
+                                const cls = (typeof n.className === 'string' ? n.className : '').toLowerCase();
+                                const id = (n.id || '').toLowerCase();
+                                if (/isi|accordion|collapse|drawer|tray|expand/.test(cls + ' ' + id)) {
+                                    const t = n.querySelector('button, [role="button"]');
+                                    if (t) { try { t.click(); } catch (err) {} }
+                                }
+                                n = n.parentElement;
+                            }
+                        }""")
+                        await asyncio.sleep(0.8)
+                        await loc_el.evaluate("""e => {
+                            e.scrollIntoView({block: 'center', inline: 'center'});
+                            const r = e.getBoundingClientRect();
+                            const mid = r.top + r.height / 2;
+                            if (mid < 0 || mid > innerHeight) window.scrollBy(0, mid - innerHeight / 2);
+                        }""")
+                        await asyncio.sleep(0.5)
+                        hit = await loc_el.evaluate(PIERCE_OVERLAY_JS)
+                        el_res_blocked = ((hit or {}).get("reason")
+                                          or ("ok" if (hit or {}).get("ok") else "?"))
+                    except Exception:
+                        pass
+
                 pierced = False
                 if not (hit and hit.get("ok")):
                     try:
@@ -5278,10 +5353,11 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
 
                 if os.environ.get("TV_DEBUG_CAND"):
                     sys.stdout.write(
-                        "      CAND[%d] zone=%s hints=%s -> event=%r params_ok=%d/%d" % (
+                        "      CAND[%d] zone=%s hints=%s method=%s blocked=%r -> event=%r params_ok=%d/%d" % (
                             _cand_i, best.get('zone'),
                             [h for h in (best.get('hints') or [])
                              if h in ('isi', 'header', 'footer', 'nav', 'sticky')],
+                            click_method, el_res_blocked,
                             (matched or {}).get('event'),
                             sum(1 for d in param_diff if d["match"]), len(param_diff))
                         + os.linesep)
