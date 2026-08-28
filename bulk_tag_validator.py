@@ -3905,7 +3905,13 @@ def list_sdr_sheets(sdr_path):
                     last = u
                 nm = _sdr_clean(_sdr_cellv(grid, r, c_name))
                 ev = _sdr_clean(_sdr_cellv(grid, r, c_ev))
-                if nm and ev:
+                # Count on any identifier — the name column is blank
+                # throughout some sheets.
+                ident = nm or any(
+                    _sdr_clean(_sdr_cellv(grid, r, cc + 1))
+                    for cc, h in enumerate(low)
+                    if 'link text' in h or 'link url' in h)
+                if ident and ev:
                     rows += 1
                     if last and last not in urls:
                         urls.append(last)
@@ -3989,7 +3995,7 @@ def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
 
         name = _sdr_clean(_sdr_cellv(grid, r, c_name)) if c_name else ''
         expected_event = _sdr_clean(_sdr_cellv(grid, r, c_event)) if c_event else ''
-        if not name or not expected_event:
+        if not expected_event:
             continue   # spacer / section heading / not a test case
 
         expected_params = {}
@@ -4001,6 +4007,19 @@ def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
             # such row for no reason, so they are treated as unspecified.
             if v and not re.fullmatch(r'<[^>]*>', v.strip()):
                 expected_params[pname] = v
+
+        # Which column names the control is not fixed. Some sheets fill
+        # "Link/Button Name" on every row; others leave it blank throughout and
+        # identify the control purely by its link text or URL. Requiring the
+        # name threw away 60 of 67 rows on one sheet, so take whichever
+        # identifier the sheet actually uses.
+        if not name:
+            name = (expected_params.get('link_text')
+                    or expected_params.get('download_file_name') or '')
+        if not name:
+            lu = expected_params.get('link_url') or ''
+            tail = re.sub(r'[?#].*$', '', lu).rstrip('/').rsplit('/', 1)[-1]
+            name = tail or lu
 
         # "All Pages" / "Global" rows still need a concrete page to test on.
         eff = page_url
@@ -4015,6 +4034,10 @@ def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
             "location": _sdr_clean(_sdr_cellv(grid, r, c_loc)).lower() if c_loc else '',
             "click_type": _sdr_clean(_sdr_cellv(grid, r, c_type)) if c_type else '',
             "button_name": name,
+            # A row can name an event and still name nothing findable on the
+            # page. It is reported as untested rather than dropped.
+            "identifiable": bool(name or expected_params.get('link_text')
+                                 or expected_params.get('link_url')),
             "link_text": expected_params.get('link_text', '') or name,
             "link_url": expected_params.get('link_url', ''),
             "expected_event": expected_event,
@@ -4840,6 +4863,16 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             # and page-view rows have no button to press, and consent-banner
             # rows are deliberately out of scope for the audit. Calling those
             # "Fail — element not found" would be wrong: nothing was tested.
+            # A row can name an event and still name nothing to click. Report
+            # it as untested rather than dropping it from the sheet entirely.
+            if not case.get("identifiable", True):
+                _record(case, "SKIPPED",
+                        "Row names no control — it has no Link/Button Name, Link Text "
+                        "or Link URL to find on the page")
+                sys.stdout.write(f"[SDR]   [{ci+1}/{len(page_cases)}] \"{label}\" -> NO TARGET (skipped)\n")
+                sys.stdout.flush()
+                continue
+
             _ct = (case.get("click_type") or "").lower()
             _nm = (case.get("button_name") or "").lower()
             _blob = _ct + " " + _nm
