@@ -1495,9 +1495,15 @@ function sdrOnSheetChange() {
         const live = cols.find(c => /live|prod/i.test(c));
         if (live) qa.value = live;
     }
-    // Seed the detect box with this sheet's first real page.
+    // Point the detect box at this sheet's first real page. It is only left
+    // alone when it already holds one of THIS sheet's URLs — otherwise it is
+    // a leftover from a different SDR and would scan the wrong site.
     const durl = sdrEl('sdrDetectUrl');
-    if (durl && !durl.value && real.length) durl.value = real[0];
+    if (durl && real.length) {
+        const cur = (durl.value || '').trim().replace(/\/$/, '');
+        const belongs = real.some(u => u.replace(/\/$/, '') === cur);
+        if (!belongs) durl.value = real[0];
+    }
     sdrUpdateRunState();
 }
 
@@ -1512,10 +1518,42 @@ function sdrUpdateRunState() {
     btn.title = ga4Ok ? '' : 'Choose which GA4 property to validate against first';
 }
 
+// Everything downstream of the file belongs to THAT file: its sheets, its
+// page URLs, the GA4 property those pages tag to, and any results. A team
+// running SDRs for several sites must never see one client's sheets or a
+// previous site's GA4 id sitting under a newly chosen file.
+function sdrClearDownstream() {
+    const sheet = sdrEl('sdrSheet');
+    if (sheet) { sheet.innerHTML = '<option value="">Reading sheets…</option>'; sheet.disabled = true; }
+    const info = sdrEl('sdrSheetInfo');
+    if (info) info.innerHTML = '';
+    const qa = sdrEl('sdrQaColumn');
+    if (qa) { qa.innerHTML = '<option value="">Auto (prefers Live/Prod)</option>'; qa.disabled = true; }
+    const idSel = sdrEl('sdrGa4Id');
+    if (idSel) { idSel.innerHTML = '<option value="">Detect IDs, then choose one…</option>'; idSel.disabled = true; }
+    const ga4info = sdrEl('sdrGa4Info');
+    if (ga4info) ga4info.innerHTML = 'Sites often tag to more than one GA4 property. Pick the one this SDR is written for — an event that fires only on the other property will be reported as a failure.';
+    const durl = sdrEl('sdrDetectUrl');
+    if (durl) durl.value = '';
+    const sum = sdrEl('sdrSummary');
+    if (sum) { sum.classList.add('hidden'); sum.innerHTML = ''; }
+    const card = sdrEl('sdrResultsCard');
+    if (card) card.classList.add('hidden');
+    const body = sdrEl('sdrBody');
+    if (body) body.innerHTML = '';
+    ['sdrDownloadFilled', 'sdrDownloadReport', 'sdrResumeBtn'].forEach(id => {
+        const el = sdrEl(id);
+        if (el) el.classList.add('hidden');
+    });
+    sdrSheets = [];
+    sdrUpdateRunState();
+}
+
 async function sdrUpload() {
     const f = sdrEl('sdrFile');
     const state = sdrEl('sdrFileState');
     if (!f || !f.files.length) { alert('Choose an SDR .xlsx file first'); return; }
+    sdrClearDownstream();
     const fd = new FormData();
     fd.append('file', f.files[0]);
     state.textContent = 'Uploading and reading sheets…';
@@ -1523,7 +1561,7 @@ async function sdrUpload() {
         const r = await fetch('/api/sdr/upload', { method: 'POST', body: fd });
         const d = await r.json();
         if (!r.ok || d.error) { state.textContent = 'Upload failed: ' + (d.error || r.status); return; }
-        state.innerHTML = '✅ <b>' + escapeHtml(d.originalName || 'SDR') + '</b> uploaded — ' +
+        state.innerHTML = '✅ Loaded <b>' + escapeHtml(d.originalName || 'SDR') + '</b> — ' +
                           (d.sheets || []).length + ' sheet(s) found';
         sdrFillSheets(d.sheets);
     } catch (e) {
@@ -1748,11 +1786,23 @@ document.addEventListener('DOMContentLoaded', () => {
         await fetch('/api/tag-validator/cancel', { method: 'POST' });
     });
     // Pick up an SDR that was uploaded in an earlier session.
+    // Choosing a file uploads it immediately. Requiring a second click was a
+    // trap: the picker kept showing the previous SDR's sheets and page URLs,
+    // so a run could be started against the wrong site without any warning.
+    const fileInput = document.getElementById('sdrFile');
+    if (fileInput) fileInput.addEventListener('change', () => {
+        if (fileInput.files && fileInput.files.length) sdrUpload();
+    });
+
     fetch('/api/sdr/sheets').then(r => r.json()).then(d => {
         if (d.sheets && d.sheets.length) {
             sdrFillSheets(d.sheets);
             const st = document.getElementById('sdrFileState');
-            if (st) st.innerHTML = 'Using the previously uploaded SDR — ' + d.sheets.length + ' sheet(s).';
+            if (st) {
+                st.innerHTML = 'Currently loaded: <b>' +
+                    escapeHtml(d.fileName || 'previously uploaded SDR') + '</b> — ' +
+                    d.sheets.length + ' sheet(s). Choose a file above to replace it.';
+            }
         }
     }).catch(() => {});
     sdrCheckResumable();

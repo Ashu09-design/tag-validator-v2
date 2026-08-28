@@ -27,6 +27,7 @@ sdr_filled.BACKUP.xlsx
 sdr_run_*.json
 SDR-Filled_*.xlsx
 sdr_input.xlsx
+sdr_input.name.txt
 sdr_filled.xlsx
 sdr_results.json
 sdr_results.xlsx

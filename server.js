@@ -151,12 +151,31 @@ app.get('/api/tag-validator/download', (req, res) => {
 // ============================================================
 
 const SDR_PATH = path.join(__dirname, 'sdr_input.xlsx');
+// Remember which file is loaded. A team runs SDRs for several different
+// sites, and a picker showing the previous client's sheets with no hint that
+// the upload never happened is how the wrong site gets QA'd.
+const SDR_NAME_PATH = path.join(__dirname, 'sdr_input.name.txt');
+
+function currentSdrName() {
+    try { return fs.readFileSync(SDR_NAME_PATH, 'utf8').trim(); } catch { return ''; }
+}
 
 app.post('/api/sdr/upload', upload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     try {
         fs.copyFileSync(req.file.path, SDR_PATH);
+        fs.writeFileSync(SDR_NAME_PATH, req.file.originalname || 'SDR.xlsx');
         try { fs.unlinkSync(req.file.path); } catch {}
+        // A new SDR invalidates the previous run completely — different site,
+        // different rows. Archive it rather than leaving it to be mistaken
+        // for results belonging to this file.
+        const live = path.join(__dirname, 'sdr_results.json');
+        if (fs.existsSync(live)) {
+            try {
+                const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                fs.renameSync(live, path.join(__dirname, `sdr_results.prev-${stamp}.json`));
+            } catch {}
+        }
     } catch (e) {
         return res.status(500).json({ error: 'Could not save file: ' + e.message });
     }
@@ -173,15 +192,15 @@ app.post('/api/sdr/upload', upload.single('file'), (req, res) => {
 });
 
 app.get('/api/sdr/sheets', (req, res) => {
-    if (!fs.existsSync(SDR_PATH)) return res.json({ sheets: [] });
+    if (!fs.existsSync(SDR_PATH)) return res.json({ sheets: [], fileName: '' });
     const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
     execFile(pyCmd, ['bulk_tag_validator.py', '--list-sdr-sheets', SDR_PATH],
         { cwd: __dirname, maxBuffer: 8 * 1024 * 1024 },
         (err, stdout) => {
-            if (err) return res.json({ sheets: [], error: String(err).slice(0, 200) });
+            if (err) return res.json({ sheets: [], fileName: currentSdrName(), error: String(err).slice(0, 200) });
             let sheets = [];
             try { sheets = JSON.parse(stdout); } catch {}
-            res.json({ sheets });
+            res.json({ sheets, fileName: currentSdrName() });
         });
 });
 
