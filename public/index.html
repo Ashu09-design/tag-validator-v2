@@ -19,47 +19,51 @@
         * { margin: 0; padding: 0; }
 
         :root {
-            /* canvas + surfaces */
-            --bg: #f1f4f8;
+            /* canvas + surfaces — a neutral gray, so the teal reads as the
+               only deliberate colour on the page */
+            --bg: #f6f7f6;
             --surface: #ffffff;
-            --surface-2: #f8fafc;
-            --surface-3: #eef2f6;
-            --border: #dfe5ec;
-            --border-strong: #c8d1dc;
-            --overlay: rgba(15, 23, 36, 0.45);
+            --surface-2: #fafbfa;
+            --surface-3: #f0f2f1;
+            --border: #e2e5e3;
+            --border-strong: #cbd0cd;
+            --overlay: rgba(12, 20, 19, 0.45);
 
             /* type */
-            --text: #0f1729;
-            --text-2: #33415c;
-            --muted: #64748b;
-            --faint: #94a3b8;
+            --text: #171c1b;
+            --text-2: #3a4341;
+            --muted: #6b7472;
+            --faint: #9aa3a1;
 
-            /* brand */
-            --accent: #1570ef;
-            --accent-hover: #175cd3;
-            --accent-press: #1849a9;
+            /* brand — deep petrol teal */
+            --accent: #0e7490;
+            --accent-hover: #155e75;
+            --accent-press: #164e63;
             --accent-on: #ffffff;
-            --accent-tint: #eff8ff;
-            --accent-edge: #b2ddff;
-            --accent-ring: rgba(21, 112, 239, 0.18);
+            --accent-tint: #ecfeff;
+            --accent-edge: #a5f0fc;
+            --accent-ring: rgba(14, 116, 144, 0.18);
 
             /* semantic — value / tint / edge */
-            --c-ok: #067647;        --t-ok: #ecfdf3;   --e-ok: #a9efc5;
+            /* pass sits next to a teal accent, so it leans clearly green */
+            --c-ok: #15803d;        --t-ok: #f0fdf4;   --e-ok: #a7f3c0;
             --c-bad: #b42318;       --t-bad: #fef3f2;  --e-bad: #fecdca;
             --c-warn: #b54708;      --t-warn: #fffaeb; --e-warn: #fedf89;
-            --c-info: #026aa2;      --t-info: #f0f9ff; --e-info: #b9e6fe;
-            --c-info-2: #0086c9;
+            --c-info: #175cd3;      --t-info: #eff8ff; --e-info: #b2ddff;
+            --c-info-2: #1570ef;
             --c-purple: #6941c6;    --t-purple: #f4f3ff; --e-purple: #d9d6fe;
-            --c-teal: #0e7090;      --t-teal: #ecfdff;   --e-teal: #a5f0fc;
+            /* Tealium's own column colour: a brighter cyan than the accent,
+               so the two read as a family without being confusable */
+            --c-teal: #0086c9;      --t-teal: #f0f9ff;   --e-teal: #b9e6fe;
             --c-orange: #c4320a;    --t-orange: #fff4ed; --e-orange: #f9dbaf;
             --c-pink: #c11574;      --t-pink: #fdf2fa;   --e-pink: #fcceee;
             --c-dim: #667085;
 
             /* elevation */
-            --sh-1: 0 1px 2px rgba(15, 23, 41, 0.05);
-            --sh-2: 0 1px 3px rgba(15, 23, 41, 0.08), 0 1px 2px rgba(15, 23, 41, 0.04);
-            --sh-3: 0 4px 12px rgba(15, 23, 41, 0.08), 0 2px 4px rgba(15, 23, 41, 0.04);
-            --sh-4: 0 12px 32px rgba(15, 23, 41, 0.12), 0 4px 8px rgba(15, 23, 41, 0.05);
+            --sh-1: 0 1px 2px rgba(12, 20, 19, 0.05);
+            --sh-2: 0 1px 3px rgba(12, 20, 19, 0.08), 0 1px 2px rgba(12, 20, 19, 0.04);
+            --sh-3: 0 4px 12px rgba(12, 20, 19, 0.08), 0 2px 4px rgba(12, 20, 19, 0.04);
+            --sh-4: 0 12px 32px rgba(12, 20, 19, 0.12), 0 4px 8px rgba(12, 20, 19, 0.05);
 
             /* geometry */
             --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-xl: 16px; --r-full: 999px;
@@ -85,34 +89,35 @@
         }
 
         [data-theme="dark"] {
-            --bg: #0a0d13;
-            --surface: #111620;
-            --surface-2: #151b26;
-            --surface-3: #1a212e;
-            --border: #232b39;
-            --border-strong: #323c4d;
+            --bg: #0a0f0f;
+            --surface: #101615;
+            --surface-2: #141b1a;
+            --surface-3: #19211f;
+            --border: #232d2b;
+            --border-strong: #32403d;
             --overlay: rgba(0, 0, 0, 0.6);
 
-            --text: #e8ecf2;
-            --text-2: #b5bfcf;
-            --muted: #8794a6;
-            --faint: #697585;
+            --text: #e7ecea;
+            --text-2: #b3bfbc;
+            --muted: #85918e;
+            --faint: #67736f;
 
-            --accent: #3b8ef7;
-            --accent-hover: #62a6fa;
-            --accent-press: #1570ef;
-            --accent-on: #ffffff;
-            --accent-tint: rgba(59, 142, 247, 0.15);
-            --accent-edge: rgba(59, 142, 247, 0.40);
-            --accent-ring: rgba(59, 142, 247, 0.30);
+            /* bright enough on a dark ground that it needs dark text on it */
+            --accent: #2dd4bf;
+            --accent-hover: #5eead4;
+            --accent-press: #14b8a6;
+            --accent-on: #05201b;
+            --accent-tint: rgba(45, 212, 191, 0.14);
+            --accent-edge: rgba(45, 212, 191, 0.40);
+            --accent-ring: rgba(45, 212, 191, 0.28);
 
             --c-ok: #4ade80;      --t-ok: rgba(34, 197, 94, 0.12);      --e-ok: rgba(34, 197, 94, 0.32);
             --c-bad: #f87171;     --t-bad: rgba(239, 68, 68, 0.12);     --e-bad: rgba(239, 68, 68, 0.34);
             --c-warn: #fbbf24;    --t-warn: rgba(251, 191, 36, 0.12);   --e-warn: rgba(251, 191, 36, 0.34);
-            --c-info: #4fc3f7;    --t-info: rgba(56, 189, 248, 0.14);   --e-info: rgba(56, 189, 248, 0.36);
-            --c-info-2: #8fd9fb;
+            --c-info: #7cb2ff;    --t-info: rgba(96, 165, 250, 0.14);   --e-info: rgba(96, 165, 250, 0.36);
+            --c-info-2: #a8ccff;
             --c-purple: #a78bfa;  --t-purple: rgba(168, 85, 247, 0.13); --e-purple: rgba(168, 85, 247, 0.36);
-            --c-teal: #2dd4bf;    --t-teal: rgba(45, 212, 191, 0.12);   --e-teal: rgba(45, 212, 191, 0.34);
+            --c-teal: #22d3ee;    --t-teal: rgba(34, 211, 238, 0.12);   --e-teal: rgba(34, 211, 238, 0.34);
             --c-orange: #fb923c;  --t-orange: rgba(251, 146, 60, 0.13); --e-orange: rgba(251, 146, 60, 0.36);
             --c-pink: #f472b6;    --t-pink: rgba(236, 72, 153, 0.13);   --e-pink: rgba(236, 72, 153, 0.36);
             --c-dim: #8a94a6;
@@ -376,6 +381,7 @@
         }
         .btn-primary:active:not(:disabled) { background: var(--accent-press); }
         .btn-primary:disabled { background: var(--accent); border-color: var(--accent); color: var(--accent-on); }
+        [data-theme="dark"] .btn-primary { font-weight: 600; }
 
         .btn-danger {
             background: var(--surface); color: var(--c-bad);
