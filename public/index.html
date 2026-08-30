@@ -89,18 +89,18 @@
         }
 
         [data-theme="dark"] {
-            --bg: #0a0f0f;
-            --surface: #101615;
-            --surface-2: #141b1a;
-            --surface-3: #19211f;
-            --border: #232d2b;
-            --border-strong: #32403d;
-            --overlay: rgba(0, 0, 0, 0.6);
+            --bg: #05090a;
+            --surface: #101a1b;
+            --surface-2: #162223;
+            --surface-3: #1d2c2c;
+            --border: #334746;
+            --border-strong: #4b6564;
+            --overlay: rgba(0, 0, 0, 0.66);
 
-            --text: #e7ecea;
-            --text-2: #b3bfbc;
-            --muted: #85918e;
-            --faint: #67736f;
+            --text: #f2f6f5;
+            --text-2: #c6d2d0;
+            --muted: #93a3a1;
+            --faint: #6f807e;
 
             /* bright enough on a dark ground that it needs dark text on it */
             --accent: #2dd4bf;
@@ -122,10 +122,10 @@
             --c-pink: #f472b6;    --t-pink: rgba(236, 72, 153, 0.13);   --e-pink: rgba(236, 72, 153, 0.36);
             --c-dim: #8a94a6;
 
-            --sh-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-            --sh-2: 0 1px 3px rgba(0, 0, 0, 0.5);
-            --sh-3: 0 4px 14px rgba(0, 0, 0, 0.5);
-            --sh-4: 0 16px 40px rgba(0, 0, 0, 0.6);
+            --sh-1: 0 1px 2px rgba(0, 0, 0, 0.55);
+            --sh-2: 0 2px 6px rgba(0, 0, 0, 0.6);
+            --sh-3: 0 6px 18px rgba(0, 0, 0, 0.6);
+            --sh-4: 0 18px 44px rgba(0, 0, 0, 0.7);
 
             --log-bg: #080b11;
             --log-text: #c9d1d9;
@@ -309,6 +309,19 @@
         }
         .table-card { overflow: hidden; margin-bottom: 20px; }
 
+        /* A card should announce where it starts. In the dark theme a plain
+           border is not enough on its own, so the top edge catches a little
+           light the way a raised surface would. */
+        [data-theme="dark"] .glass,
+        [data-theme="dark"] .table-card,
+        [data-theme="dark"] .console-container,
+        [data-theme="dark"] .control-card-module,
+        [data-theme="dark"] .control-bar,
+        [data-theme="dark"] .action-status-panel,
+        [data-theme="dark"] .stat {
+            box-shadow: var(--sh-2), inset 0 1px 0 rgba(255, 255, 255, 0.045);
+        }
+
         .dashboard-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
@@ -319,7 +332,9 @@
         .module-header {
             display: flex; align-items: center; gap: 9px;
             padding: 14px 18px;
+            background: var(--surface-2);
             border-bottom: 1px solid var(--border);
+            border-radius: var(--r-lg) var(--r-lg) 0 0;
         }
         .module-header .icon {
             width: 26px; height: 26px; flex-shrink: 0;
@@ -439,7 +454,7 @@
         }
         select:disabled, input:disabled { opacity: 0.55; cursor: not-allowed; background: var(--surface-3); }
 
-        .input-action-group { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+        .input-action-group { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
         .input-action-group input { flex: 1; min-width: 200px; }
 
         /* -------------------------------------------------- upload zones */
@@ -492,7 +507,11 @@
             background: var(--surface-2);
             border-bottom: 1px solid var(--border);
         }
-        .console-container:has(.log-box.hidden) .console-header { border-bottom: none; }
+        .console-container:has(.log-box.hidden) .console-header {
+            border-bottom: none;
+            border-radius: var(--r-lg);
+        }
+        .console-header { border-radius: var(--r-lg) var(--r-lg) 0 0; }
         .console-dots { display: flex; gap: 5px; }
         .console-dots .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--border-strong); }
         .console-dots .red { background: #ff5f57; }
@@ -532,8 +551,18 @@
             display: flex; align-items: center; justify-content: space-between;
             gap: 12px; flex-wrap: wrap;
             padding: 13px 18px;
+            background: var(--surface-2);
             border-bottom: 1px solid var(--border);
         }
+        /* the accent earns one small mark per panel, on the title */
+        .table-bar h3::before, .module-header h3::before {
+            content: ''; display: inline-block;
+            width: 3px; height: 13px; margin-right: 9px;
+            vertical-align: -2px;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+        .module-header h3::before { display: none; }
         .table-bar h3 { font-size: 0.86rem; font-weight: 600; }
 
         .table-wrap { overflow: auto; max-height: 620px; }
@@ -546,12 +575,27 @@
             font-size: 0.68rem; font-weight: 600;
             letter-spacing: 0.05em; text-transform: uppercase;
             color: var(--muted);
-            background: var(--surface-2);
-            border-bottom: 1px solid var(--border);
+            background: var(--surface-3);
+            border-bottom: 1px solid var(--border-strong);
             white-space: nowrap;
+        }
+        /* Column groups: the tone names the vendor, and the top row of a
+           two-row head is the one that carries it. Filling every cell in the
+           group with the same block of colour buried the column names, so
+           only the group row is tinted and the names below stay plain. */
+        th.h-group {
+            text-align: center;
+            font-size: 0.66rem; letter-spacing: 0.09em;
+            border-bottom: 1px solid var(--border);
         }
         th.h-adobe { color: var(--c-orange); background: var(--t-orange); }
         th.h-teal  { color: var(--c-teal);   background: var(--t-teal); }
+        th.h-gtm   { color: var(--c-purple); background: var(--t-purple); }
+        th.h-ga4   { color: var(--c-info);   background: var(--t-info); }
+        th.c-adobe { color: var(--c-orange); }
+        th.c-teal  { color: var(--c-teal); }
+        th.c-gtm   { color: var(--c-purple); }
+        th.c-ga4   { color: var(--c-info); }
 
         td {
             padding: 10px 14px;
@@ -570,8 +614,14 @@
             color: var(--text-2);
         }
         .empty-msg {
-            text-align: center; padding: 40px 20px !important;
-            color: var(--faint); font-size: 0.8rem;
+            text-align: center; padding: 52px 20px !important;
+            color: var(--muted); font-size: 0.82rem;
+        }
+        .empty-msg::before {
+            content: ''; display: block;
+            width: 34px; height: 34px; margin: 0 auto 12px;
+            border: 1.5px dashed var(--border-strong);
+            border-radius: var(--r-md);
         }
 
         .event-cell-container { max-height: 190px; overflow-y: auto; padding-right: 4px; }
@@ -1094,7 +1144,7 @@
                     </div>
                     <span class="console-title">Validator Engine Logs</span>
                 </div>
-                <div id="logBox" class="log-box hidden">System Ready... Waiting for input.</div>
+                <div id="logBox" class="log-box">System Ready... Waiting for input.</div>
             </div>
 
             <div id="statsBar" class="stats-bar hidden"></div>
@@ -1156,7 +1206,7 @@
                     </div>
                     <span class="console-title">Crawler Engine Logs</span>
                 </div>
-                <div id="dcLogBox" class="log-box hidden">System Ready... Enter a URL above to begin.</div>
+                <div id="dcLogBox" class="log-box">System Ready... Enter a URL above to begin.</div>
             </div>
 
             <div class="table-card glass" style="margin-bottom:24px;">

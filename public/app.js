@@ -386,26 +386,26 @@ function renderTable() {
         head.innerHTML = `
             <tr>
                 <th rowspan="2">#</th><th rowspan="2">URL</th>
-                <th colspan="4" class="h-teal" style="text-align:center;">TEALIUM ANALYTICS</th>
-                <th colspan="3" class="h-adobe" style="text-align:center;">ADOBE ANALYTICS</th>
+                <th colspan="4" class="h-teal h-group">TEALIUM ANALYTICS</th>
+                <th colspan="3" class="h-adobe h-group">ADOBE ANALYTICS</th>
             </tr>
             <tr>
-                <th class="h-teal">Loaded</th><th class="h-teal">Account</th><th class="h-teal">Profile</th><th class="h-teal">Env</th>
-                <th class="h-adobe">Loaded</th><th class="h-adobe">Report Suite</th><th class="h-adobe">Page View</th>
+                <th class="c-teal">Loaded</th><th class="c-teal">Account</th><th class="c-teal">Profile</th><th class="c-teal">Env</th>
+                <th class="c-adobe">Loaded</th><th class="c-adobe">Report Suite</th><th class="c-adobe">Page View</th>
             </tr>
         `;
     } else {
         head.innerHTML = `
             <tr>
                 <th rowspan="2">#</th><th rowspan="2">URL</th>
-                <th colspan="2" class="h-adobe" style="text-align:center; background:rgba(255,255,255,0.05)">GTM</th>
-                <th colspan="3" class="h-adobe" style="text-align:center; background: var(--t-info); color: var(--c-info);">GA4</th>
+                <th colspan="2" class="h-gtm h-group">GTM</th>
+                <th colspan="3" class="h-ga4 h-group">GA4</th>
             </tr>
             <tr>
-                <th style="background:var(--surface-3)">Loaded</th><th style="background:var(--surface-3)">GTM ID</th>
-                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Fired</th>
-                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Measurement ID</th>
-                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Page View</th>
+                <th class="c-gtm">Loaded</th><th class="c-gtm">GTM ID</th>
+                <th class="c-ga4">Fired</th>
+                <th class="c-ga4">Measurement ID</th>
+                <th class="c-ga4">Page View</th>
             </tr>
         `;
     }
@@ -475,7 +475,7 @@ function renderTable() {
                 html += '<table style="width:100%;margin:0;font-size:0.75rem"><thead><tr>' +
                     '<th style="width:30px">#</th><th>Element</th><th>Text</th><th>Type</th><th>Zone</th>' +
                     '<th class="h-teal">GA4 Event 1</th><th class="h-teal">GA4 Event 2</th><th class="h-teal">GA4 Event 3</th>' +
-                    '<th class="h-adobe">Adobe / Other Calls</th><th>Network</th></tr></thead><tbody>';
+                    '<th class="c-adobe">Adobe / Other Calls</th><th>Network</th></tr></thead><tbody>';
                 elems.forEach((el, j) => {
                     const ga4_1 = formatSingleGa4Event(el.ga4_events[0]);
                     const ga4_2 = formatSingleGa4Event(el.ga4_events[1]);
@@ -846,25 +846,25 @@ function renderDcTable() {
         head.innerHTML = `
             <tr>
                 <th rowspan="2">#</th><th rowspan="2">URL</th>
-                <th colspan="4" class="h-teal" style="text-align:center;">TEALIUM ANALYTICS</th>
-                <th colspan="3" class="h-adobe" style="text-align:center;">ADOBE ANALYTICS</th>
+                <th colspan="4" class="h-teal h-group">TEALIUM ANALYTICS</th>
+                <th colspan="3" class="h-adobe h-group">ADOBE ANALYTICS</th>
             </tr>
             <tr>
-                <th class="h-teal">Loaded</th><th class="h-teal">Account</th><th class="h-teal">Profile</th><th class="h-teal">Env</th>
-                <th class="h-adobe">Loaded</th><th class="h-adobe">Report Suite</th><th class="h-adobe">Page View</th>
+                <th class="c-teal">Loaded</th><th class="c-teal">Account</th><th class="c-teal">Profile</th><th class="c-teal">Env</th>
+                <th class="c-adobe">Loaded</th><th class="c-adobe">Report Suite</th><th class="c-adobe">Page View</th>
             </tr>`;
     } else {
         head.innerHTML = `
             <tr>
                 <th rowspan="2">#</th><th rowspan="2">URL</th>
-                <th colspan="2" class="h-adobe" style="text-align:center; background:rgba(255,255,255,0.05)">GTM</th>
-                <th colspan="3" class="h-adobe" style="text-align:center; background: var(--t-info); color: var(--c-info);">GA4</th>
+                <th colspan="2" class="h-gtm h-group">GTM</th>
+                <th colspan="3" class="h-ga4 h-group">GA4</th>
             </tr>
             <tr>
-                <th style="background:var(--surface-3)">Loaded</th><th style="background:var(--surface-3)">GTM ID</th>
-                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Fired</th>
-                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Measurement ID</th>
-                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Page View</th>
+                <th class="c-gtm">Loaded</th><th class="c-gtm">GTM ID</th>
+                <th class="c-ga4">Fired</th>
+                <th class="c-ga4">Measurement ID</th>
+                <th class="c-ga4">Page View</th>
             </tr>`;
     }
 
@@ -925,7 +925,7 @@ function renderDcTable() {
                 html += '<table style="width:100%;margin:0;font-size:0.75rem"><thead><tr>' +
                     '<th style="width:30px">#</th><th>Element</th><th>Text</th><th>Type</th><th>Zone</th>' +
                     '<th class="h-teal">GA4 Event 1</th><th class="h-teal">GA4 Event 2</th><th class="h-teal">GA4 Event 3</th>' +
-                    '<th class="h-adobe">Adobe / Other Calls</th><th>Network</th></tr></thead><tbody>';
+                    '<th class="c-adobe">Adobe / Other Calls</th><th>Network</th></tr></thead><tbody>';
                 elems.forEach((el, j) => {
                     const ga4_1 = formatSingleGa4Event(el.ga4_events[0]);
                     const ga4_2 = formatSingleGa4Event(el.ga4_events[1]);
