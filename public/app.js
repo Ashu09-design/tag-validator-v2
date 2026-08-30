@@ -1,9 +1,6 @@
 let currentAuditMode = 'tealium';
 let cachedResults = [];
 let scheduleFile = null;
-let richResults = [];                 // per-scenario pixel data (source attribution)
-let scenarioList = ['Accept All', 'Reject All', 'Performance', 'Functional', 'Targeting'];
-let currentScenario = 'Accept All';
 let clickResults = [];                // per-element click tracking data
 let dcClickResults = [];              // domain crawl click tracking data
 
@@ -97,46 +94,13 @@ function setAuditMode(mode) {
     currentAuditMode = mode;
     document.getElementById('modeTealium').classList.toggle('active', mode === 'tealium');
     document.getElementById('modeGA4').classList.toggle('active', mode === 'ga4');
-    document.getElementById('modePixels').classList.toggle('active', mode === 'pixels');
     document.getElementById('modeClicks').classList.toggle('active', mode === 'clicks');
-    const sct = document.getElementById('scenarioTabs');
-    if (mode === 'pixels') {
-        sct.classList.remove('hidden');
-        renderScenarioTabs();
-        loadRich();
-    } else {
-        sct.classList.add('hidden');
-    }
     if (mode === 'clicks') {
         loadClickResults();
     }
     renderTable();
 }
 
-function setScenario(sc) {
-    currentScenario = sc;
-    renderScenarioTabs();
-    renderTable();
-}
-
-function renderScenarioTabs() {
-    document.getElementById('scenarioTabs').innerHTML = scenarioList.map(sc =>
-        `<button class="sc-btn ${sc === currentScenario ? 'active' : ''}" onclick="setScenario('${sc.replace(/'/g, "\\'")}')">${sc}</button>`
-    ).join('');
-}
-
-async function loadRich() {
-    try {
-        const d = await (await fetch('/api/tag-validator/results-rich')).json();
-        if (d.scenarios && d.scenarios.length) scenarioList = d.scenarios;
-        if (!scenarioList.includes(currentScenario)) currentScenario = scenarioList[0];
-        richResults = d.results || [];
-        if (currentAuditMode === 'pixels') { renderScenarioTabs(); renderTable(); }
-    } catch { richResults = []; }
-}
-
-const SRC_CLASS = { 'Tealium': 'src-teal', 'Adobe': 'src-adobe', 'GTM / gtag': 'src-gtm', 'Hardcoded': 'src-hard', 'Detected (JS)': 'src-hard' };
-const srcChip = s => `<span class="src ${SRC_CLASS[s] || 'src-hard'}">${s}</span>`;
 
 // ===== CLICK RESULTS =====
 async function loadClickResults() {
@@ -399,7 +363,6 @@ async function loadResults() {
     if (!d.results || !d.results.length) return;
     cachedResults = d.results;
     document.getElementById('downloadBtn').classList.remove('hidden');
-    if (currentAuditMode === 'pixels') await loadRich();
     if (currentAuditMode === 'clicks') await loadClickResults();
     renderTable();
 }
@@ -417,17 +380,6 @@ function renderTable() {
                 <th class="h-teal" style="text-align:center">With Tracking</th>
                 <th style="text-align:center; color:var(--c-bad)">No Tracking</th>
                 <th>Details</th>
-            </tr>
-        `;
-    } else if (currentAuditMode === 'pixels') {
-        head.innerHTML = `
-            <tr>
-                <th>#</th><th>URL</th>
-                <th class="h-pix">Marketing Pixel</th>
-                <th class="h-pix">Pixel ID</th>
-                <th class="h-pix" style="text-align:center">Fires</th>
-                <th class="h-pix">Fired From (Source)</th>
-                <th style="text-align:center;">Compliance</th>
             </tr>
         `;
     } else if (currentAuditMode === 'tealium') {
@@ -459,7 +411,7 @@ function renderTable() {
     }
 
     if (!cachedResults.length) {
-        const ec = currentAuditMode === 'clicks' ? 6 : currentAuditMode === 'pixels' ? 7 : (currentAuditMode === 'tealium' ? 9 : 7);
+        const ec = currentAuditMode === 'clicks' ? 6 : (currentAuditMode === 'tealium' ? 9 : 7);
         body.innerHTML = `<tr><td colspan="${ec}" class="empty-msg">Upload a file and run validation</td></tr>`;
         statsBar.classList.add('hidden');
         return;
@@ -485,13 +437,6 @@ function renderTable() {
             <div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${tracked}</div><div class="stat-lbl">With Analytics Tracking</div></div></div>
             <div class="stat"><div class="stat-dot" style="background:var(--c-bad);color:var(--c-bad);"></div><div><div class="stat-val" style="color:var(--c-bad);">${untracked}</div><div class="stat-lbl">No Tracking Detected</div></div></div>
             <div class="stat"><div class="stat-dot" style="background:var(--c-purple);color:var(--c-purple);"></div><div><div class="stat-val" style="color:var(--c-purple);">${accuracy}%</div><div class="stat-lbl">Tracking Accuracy</div></div></div>
-        `;
-    } else if (currentAuditMode === 'pixels') {
-        const fires = cachedResults.reduce((a, r) => a + (Number(r[currentScenario + '_Count']) || 0), 0);
-        statsBar.innerHTML = `
-            <div class="stat"><div class="stat-dot" style="background:var(--c-info);color:var(--c-info);"></div><div><div class="stat-val" style="color:var(--c-info-2);">${fires}</div><div class="stat-lbl">Pixel Fires · ${currentScenario}</div></div></div>
-            <div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${st.compliant}/${cachedResults.length}</div><div class="stat-lbl">Compliant (no pixels on Reject All)</div></div></div>
-            <div class="stat"><div class="stat-dot" style="background:var(--c-bad);color:var(--c-bad);"></div><div><div class="stat-val" style="color:var(--c-bad);">${st.violations}/${cachedResults.length}</div><div class="stat-lbl">Violations (pixels after Reject All)</div></div></div>
         `;
     } else if (currentAuditMode === 'tealium') {
         statsBar.innerHTML = `<div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${st.teal}/${cachedResults.length}</div><div class="stat-lbl">Tealium Detected</div></div></div>`;
@@ -622,35 +567,6 @@ function renderTable() {
         return;
     }
 
-    if (currentAuditMode === 'pixels') {
-        const richByUrl = {};
-        richResults.forEach(x => { richByUrl[x.URL] = x; });
-        let html = '';
-        cachedResults.forEach((r, i) => {
-            const rich = richByUrl[r.URL];
-            const px = (rich && rich.scenarios && rich.scenarios[currentScenario]) || [];
-            const span = px.length || 1;
-            const comp = `<td style="text-align:center" rowspan="${span}">${B(r.Compliance)}</td>`;
-            if (!px.length) {
-                html += `<tr><td>${i + 1}</td><td class="url-col" title="${r.URL}">${r.URL}</td>` +
-                    `<td colspan="4" style="color:var(--muted)">No marketing pixels fired in “${currentScenario}”</td>${comp}</tr>`;
-                return;
-            }
-            px.forEach((p, j) => {
-                html += `<tr>
-                    ${j === 0 ? `<td rowspan="${span}">${i + 1}</td>
-                      <td rowspan="${span}" class="url-col" title="${r.URL}">${r.URL}</td>` : ''}
-                    <td><b>${p.name}</b></td>
-                    <td>${p.id ? '<span class="mono">' + p.id + '</span>' : '<span style="color:var(--text-2)">--</span>'}</td>
-                    <td style="text-align:center"><span class="badge b-count">${p.count}</span></td>
-                    <td>${srcChip(p.source)}</td>
-                    ${j === 0 ? comp : ''}</tr>`;
-            });
-        });
-        body.innerHTML = html;
-        return;
-    }
-
     body.innerHTML = cachedResults.map((r, i) => {
         if (currentAuditMode === 'tealium') {
             return `<tr>
@@ -730,28 +646,12 @@ async function loadHistory() {
 let dcMode = 'tealium';
 let dcPollHandle = null;
 let dcCachedResults = [];
-let dcRichResults = [];
 
 function setDomainMode(mode) {
     dcMode = mode;
     document.getElementById('dcModeTealium').classList.toggle('active', mode === 'tealium');
     document.getElementById('dcModeGA4').classList.toggle('active', mode === 'ga4');
-    document.getElementById('dcModePixels').classList.toggle('active', mode === 'pixels');
     document.getElementById('dcModeClicks').classList.toggle('active', mode === 'clicks');
-    document.getElementById('dcScenarioTabs').classList.toggle('hidden', mode !== 'pixels');
-    if (mode === 'pixels') renderDcScenarioTabs();
-    renderDcTable();
-}
-
-function renderDcScenarioTabs() {
-    document.getElementById('dcScenarioTabs').innerHTML = scenarioList.map(sc =>
-        `<button class="sc-btn ${sc === currentScenario ? 'active' : ''}" onclick="setDcScenario('${sc.replace(/'/g, "\\'")}')">${sc}</button>`
-    ).join('');
-}
-
-function setDcScenario(sc) {
-    currentScenario = sc;
-    renderDcScenarioTabs();
     renderDcTable();
 }
 
@@ -918,15 +818,6 @@ async function loadDcResults() {
     if (!d.results || !d.results.length) { renderDcTable(); return; }
     dcCachedResults = d.results;
     document.getElementById('dcDownloadBtn').classList.remove('hidden');
-    if (dcMode === 'pixels') {
-        try {
-            const rr = await (await fetch('/api/tag-validator/results-rich')).json();
-            if (rr.scenarios && rr.scenarios.length) scenarioList = rr.scenarios;
-            if (!scenarioList.includes(currentScenario)) currentScenario = scenarioList[0];
-            dcRichResults = rr.results || [];
-            renderDcScenarioTabs();
-        } catch { dcRichResults = []; }
-    }
     if (dcMode === 'clicks') {
         try {
             const cr = await (await fetch('/api/tag-validator/click-results')).json();
@@ -950,16 +841,6 @@ function renderDcTable() {
                 <th class="h-teal" style="text-align:center">With Tracking</th>
                 <th style="text-align:center; color:var(--c-bad)">No Tracking</th>
                 <th>Details</th>
-            </tr>`;
-    } else if (dcMode === 'pixels') {
-        head.innerHTML = `
-            <tr>
-                <th>#</th><th>URL</th>
-                <th class="h-pix">Marketing Pixel</th>
-                <th class="h-pix">Pixel ID</th>
-                <th class="h-pix" style="text-align:center">Fires</th>
-                <th class="h-pix">Fired From (Source)</th>
-                <th style="text-align:center;">Compliance</th>
             </tr>`;
     } else if (dcMode === 'tealium') {
         head.innerHTML = `
@@ -988,7 +869,7 @@ function renderDcTable() {
     }
 
     if (!dcCachedResults.length) {
-        const ec = dcMode === 'clicks' ? 6 : dcMode === 'pixels' ? 7 : (dcMode === 'tealium' ? 9 : 7);
+        const ec = dcMode === 'clicks' ? 6 : (dcMode === 'tealium' ? 9 : 7);
         body.innerHTML = `<tr><td colspan="${ec}" class="empty-msg">Run Crawl + Validate to see tag audit per page</td></tr>`;
         statsBar.classList.add('hidden');
         return;
@@ -1013,12 +894,6 @@ function renderDcTable() {
             <div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${tracked}</div><div class="stat-lbl">With Analytics Tracking</div></div></div>
             <div class="stat"><div class="stat-dot" style="background:var(--c-bad);color:var(--c-bad);"></div><div><div class="stat-val" style="color:var(--c-bad);">${untracked}</div><div class="stat-lbl">No Tracking Detected</div></div></div>
         `;
-    } else if (dcMode === 'pixels') {
-        const fires = dcCachedResults.reduce((a, r) => a + (Number(r[currentScenario + '_Count']) || 0), 0);
-        statsBar.innerHTML = `
-            <div class="stat"><div class="stat-dot" style="background:var(--c-info);color:var(--c-info);"></div><div><div class="stat-val" style="color:var(--c-info-2);">${fires}</div><div class="stat-lbl">Pixel Fires · ${currentScenario}</div></div></div>
-            <div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${st.compliant}/${dcCachedResults.length}</div><div class="stat-lbl">Compliant</div></div></div>
-            <div class="stat"><div class="stat-dot" style="background:var(--c-bad);color:var(--c-bad);"></div><div><div class="stat-val" style="color:var(--c-bad);">${st.violations}/${dcCachedResults.length}</div><div class="stat-lbl">Violations</div></div></div>`;
     } else if (dcMode === 'tealium') {
         statsBar.innerHTML = `<div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${st.teal}/${dcCachedResults.length}</div><div class="stat-lbl">Tealium Detected</div></div></div>`;
     } else {
@@ -1137,35 +1012,6 @@ function renderDcTable() {
                 html += '</tbody></table>';
             }
             html += '</td></tr>';
-        });
-        body.innerHTML = html;
-        return;
-    }
-
-    if (dcMode === 'pixels') {
-        const richByUrl = {};
-        dcRichResults.forEach(x => { richByUrl[x.URL] = x; });
-        let html = '';
-        dcCachedResults.forEach((r, i) => {
-            const rich = richByUrl[r.URL];
-            const px = (rich && rich.scenarios && rich.scenarios[currentScenario]) || [];
-            const span = px.length || 1;
-            const comp = `<td style="text-align:center" rowspan="${span}">${B(r.Compliance)}</td>`;
-            if (!px.length) {
-                html += `<tr><td>${i + 1}</td><td class="url-col" title="${r.URL}">${r.URL}</td>` +
-                    `<td colspan="4" style="color:var(--muted)">No marketing pixels fired in “${currentScenario}”</td>${comp}</tr>`;
-                return;
-            }
-            px.forEach((p, j) => {
-                html += `<tr>
-                    ${j === 0 ? `<td rowspan="${span}">${i + 1}</td>
-                      <td rowspan="${span}" class="url-col" title="${r.URL}">${r.URL}</td>` : ''}
-                    <td><b>${p.name}</b></td>
-                    <td>${p.id ? '<span class="mono">' + p.id + '</span>' : '<span style="color:var(--text-2)">--</span>'}</td>
-                    <td style="text-align:center"><span class="badge b-count">${p.count}</span></td>
-                    <td>${srcChip(p.source)}</td>
-                    ${j === 0 ? comp : ''}</tr>`;
-            });
         });
         body.innerHTML = html;
         return;
@@ -1349,7 +1195,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (document.getElementById('chatBody').children.length) return;
         addChatMessage('bot', "Hey! I'm **Tagly** 👋 your web-analytics assistant. I can:\n\n"
             + "- Audit any URL — **GTM, GA4, Adobe, Tealium**, IDs, report suites, page-view tags\n"
-            + "- Check **marketing pixels** across consent scenarios\n"
             + "- **Crawl a whole domain** into an Excel of page URLs\n"
             + "- Explain **how to fix** tagging issues with examples\n\n"
             + "What are we looking at today?");

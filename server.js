@@ -139,7 +139,7 @@ app.get('/api/tag-validator/download', (req, res) => {
     const p = path.join(__dirname, 'validation_results.xlsx');
     if (!fs.existsSync(p))
         return res.status(404).send('No report yet — run a validation first.');
-    const label = { tealium: 'Tealium-Adobe', ga4: 'GA4-GTM', pixels: 'Marketing-Pixels', clicks: 'Click-Tracking' }[lastRunMode] || lastRunMode;
+    const label = { tealium: 'Tealium-Adobe', ga4: 'GA4-GTM', clicks: 'Click-Tracking' }[lastRunMode] || lastRunMode;
     res.download(p, `Report-${label}.xlsx`);
 });
 
@@ -379,18 +379,6 @@ app.get('/api/tag-validator/crawled-urls/download', (req, res) => {
     res.download(p, 'Crawled_URLs.xlsx');
 });
 
-// Rich per-scenario pixel data (source attribution) for the Pixels view
-app.get('/api/tag-validator/results-rich', (req, res) => {
-    const p = path.join(__dirname, 'validation_results.json');
-    if (!fs.existsSync(p)) return res.json({ results: [], scenarios: [] });
-    try {
-        const d = JSON.parse(fs.readFileSync(p, 'utf8'));
-        res.json({ results: d.results || [], scenarios: d.scenarios || [] });
-    } catch {
-        res.json({ results: [], scenarios: [] });
-    }
-});
-
 // Rich per-element click tracking data (GA4 events + Adobe calls per click)
 app.get('/api/tag-validator/click-results', (req, res) => {
     const p = path.join(__dirname, 'click_results.json');
@@ -503,8 +491,6 @@ function analyzeFailures() {
         const present = passKeys.filter(k => k in r);
         if (present.length && !present.some(k => r[k] === 'PASS'))
             reasons.push('No analytics tag detected');
-        if (r.Compliance === 'FAIL')
-            reasons.push('Consent violation: pixels fired without consent');
         if (reasons.length) failed.push({ url: r.URL, reasons });
     }
     return { failed, total: rows.length };

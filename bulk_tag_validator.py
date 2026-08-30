@@ -138,113 +138,9 @@ REJECT_TEXT_PATTERNS = [
     "Essential only", "Continue without accepting",
 ]
 
-# Marketing / advertising pixels keyed by domain fragments found in network requests
-MARKETING_PIXELS = {
-    # --- Social / Ad-network pixels (Targeting category) ---
-    "Meta / Facebook Pixel": ["facebook.com/tr", "connect.facebook.net/en_us/fbevents",
-                              "connect.facebook.net/signals", "facebook.com/signals",
-                              "/fbevents.js"],
-    "Google Ads": ["googleads.g.doubleclick.net", "googleadservices.com",
-                   "/pagead/1p-conversion", "/pagead/viewthroughconversion",
-                   "/pagead/conversion", "google.com/ads/ga-audiences",
-                   "google.com/pagead"],
-    "Floodlight (DV360)": ["fls.doubleclick.net", "ad.doubleclick.net/activity",
-                           "ad.doubleclick.net/ddm/activity"],
-    "Google DV360 / Display": ["stats.g.doubleclick.net/g/collect",
-                                "stats.g.doubleclick.net/r/collect",
-                                "stats.g.doubleclick.net/j/collect"],
-    "LinkedIn Insight": ["px.ads.linkedin.com", "snap.licdn.com/li.lms-analytics",
-                         "/li/track", "/collect/?pid="],
-    "TikTok Pixel": ["analytics.tiktok.com", "tiktok.com/i18n/pixel",
-                     "tiktok.com/api/v2/pixel", "business-api.tiktok.com/track"],
-    "X / Twitter Pixel": ["static.ads-twitter.com", "analytics.twitter.com",
-                          "t.co/i/adsct", "ads-api.twitter.com"],
-    "Pinterest Tag": ["ct.pinterest.com", "s.pinimg.com/ct", "/v3/?event="],
-    "Snapchat Pixel": ["tr.snapchat.com", "sc-static.net/scevent"],
-    "Microsoft / Bing UET": ["bat.bing.com", "bat.bing.net"],
-    "Criteo": ["criteo.com/", "criteo.net/", "static.criteo.net"],
-    "Reddit Pixel": ["pixel.reddit.com", "alb.reddit.com", "redditstatic.com/ads"],
-    "Quora Pixel": ["q.quora.com"],
-    "Taboola": ["taboola.com/libtrc", "trc.taboola.com"],
-    "Outbrain": ["outbrain.com/utils", "tr.outbrain.com", "amplify.outbrain.com"],
-    "Amazon Ads": ["amazon-adsystem.com", "aax.amazon-adsystem.com"],
-    "Yahoo / Verizon": ["analytics.yahoo.com", "sp.analytics.yahoo.com"],
-    "Yandex Metrica": ["mc.yandex.ru/metrika", "mc.yandex.com/metrika",
-                       "mc.yandex.ru/watch"],
-    "VK Pixel": ["vk.com/rtrg", "top-fwz1.mail.ru/counter"],
-    "AdRoll": ["d.adroll.com", "s.adroll.com", "pubads.adroll.com"],
-    "Spotify Pixel": ["ads.spotify.com/pixel", "ads-pixel.spotify.com"],
-    "Adform": ["track.adform.net", "a1.adform.net", "s1.adform.net"],
-
-    # --- Marketing automation / B2B ---
-    "Marketo / Munchkin": ["munchkin.marketo.net", "/munchkin.js",
-                           ".mktoresp.com/webevents", ".mktoresp.com/ajax",
-                           "pages.marketo.com", "app-sjqe.marketo.com",
-                           ".marketo.com/index.php/", "/munchkin/"],
-    "Eloqua (Oracle)": ["secure.eloqua.com", "img.en25.com",
-                         ".t.eloqua.com", ".en25.com/e/",
-                         "elqcfg.min.js", "elqimg.com"],
-    "Pardot / Salesforce MC": ["pi.pardot.com", "go.pardot.com",
-                                "pardot.com/pd.js", "pi.demandbase.com"],
-    "HubSpot": ["js.hs-analytics.net", "js.hs-scripts.com", "track.hubspot.com",
-                 "forms.hsforms.com", "api.hubapi.com",
-                 "js.hsadspixel.net", "js.hs-banner.com"],
-    "6sense": ["epsilon.6sense.com", "j.6sc.co", "b.6sc.co",
-                "company.6sense.com"],
-    "Demandbase": ["api.company-target.com", "tag.demandbase.com",
-                    "secure.demandbase.com", "ipv6.company-target.com"],
-    "Klaviyo": ["a.klaviyo.com", "static.klaviyo.com", "static-tracking.klaviyo.com",
-                 "fivetran.klaviyo.com"],
-    "Mailchimp": ["chimpstatic.com", "list-manage.com/track",
-                   "mailchi.mp"],
-    "Iterable": ["api.iterable.com/api/embedded",
-                  "links.iterable.com"],
-    "Braze": ["braze.com/api/v3/data", ".braze.com/api/v3",
-               "sondheim.iad-01.braze.com", "sdk.iad-01.braze.com"],
-    "ActiveCampaign": ["trackcmp.net", ".activehosted.com"],
-    "Marketo Measure (Bizible)": ["cdn.bizible.com", "bizibly.com",
-                                    "ipv6.bizible.com"],
-    "Adobe Marketo Engage": [".marketo.com/rs/",
-                              "tracker.marketo.com"],
-    "RollWorks": ["d.adroll.com/pixel", "s.adroll.com/r/",
-                   "getrollworks.com"],
-}
-
-# JS global objects created by marketing pixel libraries.
-# Used as a fallback: if CDP/Performance missed the beacon but the vendor
-# library loaded and initialised, we detect it via these globals.
-PIXEL_JS_GLOBALS = {
-    "Meta / Facebook Pixel": ["fbq", "_fbq"],
-    "Google Ads": ["gtag", "google_trackConversion"],
-    "LinkedIn Insight": ["_linkedin_data_partner_ids", "lintrk"],
-    "TikTok Pixel": ["ttq"],
-    "X / Twitter Pixel": ["twq"],
-    "Pinterest Tag": ["pintrk"],
-    "Snapchat Pixel": ["snaptr"],
-    "Microsoft / Bing UET": ["UET", "uetq"],
-    "Criteo": ["criteo_q"],
-    "Reddit Pixel": ["rdt"],
-    "Quora Pixel": ["qp"],
-    "Taboola": ["_tfa"],
-    "Outbrain": ["obApi"],
-    "Amazon Ads": ["amzn"],
-}
-
-
-def detect_marketing_pixels(url):
-    """Return the set of marketing pixel names matched by a request URL."""
-    low = (url or "").lower()
-    found = set()
-    for name, fragments in MARKETING_PIXELS.items():
-        if any(f in low for f in fragments):
-            found.add(name)
-    return found
-
-
 # ===== CONSENT SCENARIOS (OneTrust category model) =====
 # C0001 Strictly Necessary | C0002 Performance | C0003 Functional
 # C0004 Targeting | C0005 Social Media
-SCENARIOS = ["Accept All", "Reject All", "Performance", "Functional", "Targeting"]
 SCENARIO_GROUPS = {
     "Accept All":  "C0001:1,C0002:1,C0003:1,C0004:1,C0005:1",
     "Reject All":  "C0001:1,C0002:0,C0003:0,C0004:0,C0005:0",
@@ -259,149 +155,6 @@ SCENARIO_GROUPS = {
 #     Clicking "Accept All" would grant FULL consent and destroy the
 #     partial-category meaning. The injected OneTrust OptanonConsent cookie
 #     (set per category below) is what governs these scenarios.
-SCENARIO_ACTION = {
-    "Accept All": "accept",
-    "Reject All": "reject",
-    "Performance": "none",
-    "Functional": "none",
-    "Targeting": "none",
-}
-
-# Initiator-script signatures -> who fired the request
-SOURCE_SIGNATURES = [
-    ("Tealium", ["tiqcdn.com", "tiqcdn.net", "tags.tiqcdn", "/utag/", "utag.js",
-                 "utag.sync", "tealium"]),
-    ("Adobe",   ["assets.adobedtm.com", "/satellite-", "/launch-", "launch.min.js",
-                 "launch-ensighten", "appmeasurement", "s_code", "demdex.net",
-                 "adobedc.net", "/at.js", "omtrdc", "adobe.com/launch"]),
-    ("GTM / gtag", ["googletagmanager.com/gtm", "googletagmanager.com/gtag",
-                    "/gtm.js", "/gtag/js", "googletagmanager.com/a"]),
-]
-
-
-def _match_signature(url):
-    low = (url or "").lower()
-    for name, sigs in SOURCE_SIGNATURES:
-        if any(s in low for s in sigs):
-            return name
-    return None
-
-
-def classify_source(initiator_urls, page_host):
-    """Plain (non-recursive) check of a single initiator frontier."""
-    for u in initiator_urls:
-        m = _match_signature(u)
-        if m:
-            return m
-    return None
-
-
-def resolve_source(seed_urls, init_map, page_host, max_depth=8):
-    """Walk the request-initiator graph upward to find the true source.
-
-    A pixel beacon's *direct* initiator is usually the pixel vendor's own
-    library (e.g. fbevents.js). To know who really deployed it we follow
-    'who loaded that script?' until we hit a tag manager (Tealium / Adobe /
-    GTM) or run out of parents (=> the tag is hardcoded on the site)."""
-    visited = set()
-    frontier = [u for u in (seed_urls or []) if u]
-    depth = 0
-    while frontier and depth < max_depth:
-        # Does anything in the current frontier belong to a tag manager?
-        for u in frontier:
-            m = _match_signature(u)
-            if m:
-                return m
-        # Climb to the scripts that loaded the current frontier scripts
-        nxt = []
-        for u in frontier:
-            if u in visited:
-                continue
-            visited.add(u)
-            for parent in init_map.get(u, []):
-                if parent and parent not in visited:
-                    nxt.append(parent)
-        frontier = nxt
-        depth += 1
-    return "Hardcoded"
-
-
-# Pixel-ID extraction: regex applied to the beacon URL (and POST body)
-PIXEL_ID_PATTERNS = {
-    "Meta / Facebook Pixel": [r'facebook\.com/tr/?\?(?:[^&]*&)*id=(\d{6,})',
-                              r'[?&]id=(\d{8,})'],
-    "Google Ads": [r'/(?:viewthroughconversion|conversion|1p-conversion)/(\d{6,})',
-                    r'[?&]tid=(AW-\d+)', r'[?&]label=([\w-]+)'],
-    "Floodlight (DV360)": [r'[;?&]src=(\d+)', r'/activity[i]?;src=(\d+)'],
-    "LinkedIn Insight": [r'[?&]pid=(\d+)', r'/px/li/track\?pid=(\d+)'],
-    "TikTok Pixel": [r'[?&]sdkid=([A-Za-z0-9]+)', r'[?&]pixel_code=([A-Za-z0-9]+)'],
-    "X / Twitter Pixel": [r'[?&]txn_id=([A-Za-z0-9]+)', r'[?&]p_id=([A-Za-z0-9]+)'],
-    "Pinterest Tag": [r'[?&]tid=(\d+)'],
-    "Snapchat Pixel": [r'[?&]pid=([A-Za-z0-9-]+)', r'[?&]id=([A-Za-z0-9-]{6,})'],
-    "Microsoft / Bing UET": [r'[?&]ti=(\d+)'],
-    "Criteo": [r'[?&]a=(\d+)'],
-    "Reddit Pixel": [r'pixel\.reddit\.com/.*?[?&]id=([A-Za-z0-9_]+)', r'/(t2_[a-z0-9]+)/'],
-    "Quora Pixel": [r'q\.quora\.com/_/ad/([0-9a-f]+)/pixel'],
-    "Taboola": [r'/libtrc/(?:unip/)?(\d+)/', r'[?&]tim=.*?(\d{4,})'],
-    "Outbrain": [r'[?&]marketerId=([A-Za-z0-9]+)'],
-    "Amazon Ads": [r'amazon-adsystem\.com/[^?]*[?&](?:cb|pid)=([A-Za-z0-9-]+)'],
-    "Yahoo / Verizon": [r'[?&]a=(\d+)'],
-    # Marketo Munchkin ID is "###-XXX-###" (e.g. 165-AEK-754); shows up both in
-    # the loader URL (munchkin.marketo.net/{id}/munchkin.js) and as the
-    # subdomain of the tracking endpoint ({id}.mktoresp.com).
-    "Marketo / Munchkin": [r'munchkin\.marketo\.net/(\d{3}-[A-Z]{3}-\d{3})',
-                            r'/(\d{3}-[A-Z]{3}-\d{3})/munchkin\.js',
-                            r'(\d{3}-[A-Z]{3}-\d{3})\.mktoresp\.com',
-                            r'[?&]munchkinId=(\d{3}-[A-Z]{3}-\d{3})'],
-    "Eloqua (Oracle)": [r'secure\.eloqua\.com/visitor/v200/svrGP\?.*?[?&]elqSiteId=(\d+)',
-                         r'[?&]elqSiteID=(\d+)',
-                         r'/sites/(\d+)/'],
-    "Pardot / Salesforce MC": [r'pi\.pardot\.com/(?:visitor|prospect)/.*?[?&]ver=(\d+)',
-                                r'[?&]pi_id=(\d+)',
-                                r'[?&]account_id=(\d+)'],
-    "HubSpot": [r'js\.hs-analytics\.net/analytics/\d+/(\d+)\.js',
-                 r'js\.hs-scripts\.com/(\d+)\.js',
-                 r'[?&]portalId=(\d+)'],
-    "6sense": [r'[?&]cid=([A-Za-z0-9_-]+)'],
-    "Demandbase": [r'[?&]key=([A-Za-z0-9]+)'],
-    "Drift": [r'/(?:\d+)/([a-z0-9]{20,})/'],
-    "Klaviyo": [r'[?&]c=([A-Za-z0-9]+)', r'/onsite/track/.*?company_id=([A-Za-z0-9]+)'],
-    "Optimizely": [r'cdn\.optimizely\.com/(?:js|datafiles)/(\d+)\.js'],
-    "Yandex Metrica": [r'/watch/(\d+)', r'mc\.yandex\.[a-z]+/.*?[?&]tid=(\d+)'],
-    "Adform": [r'[?&]mid=(\d+)', r'[?&]pm=(\d+)'],
-}
-
-
-def pick_source(source_counts):
-    """Return the EXACT source the pixel actually fired from — the source
-    responsible for the most beacon fires (dominant origin), not a fixed
-    priority guess. `source_counts` is {source: number_of_fires}.
-
-    Tie-break: a real tag manager (Tealium/Adobe/GTM) beats 'Hardcoded',
-    because a tied 'Hardcoded' is almost always just the vendor library
-    script load, while the manager is what actually deployed the tag."""
-    if not source_counts:
-        return "Hardcoded"
-    mx = max(source_counts.values())
-    top = [s for s, c in source_counts.items() if c == mx]
-    if len(top) == 1:
-        return top[0]
-    for s in ("Tealium", "Adobe", "GTM / gtag"):
-        if s in top:
-            return s
-    return top[0]
-
-
-def extract_pixel_id(name, url, post_data=""):
-    """Best-effort extraction of the advertiser/pixel ID from a beacon."""
-    blob = url + (("&" + post_data) if post_data else "")
-    for pat in PIXEL_ID_PATTERNS.get(name, []):
-        m = re.search(pat, blob, re.I)
-        if m:
-            return m.group(1)
-    return ""
-
-
 def _host_of(url):
     try:
         return urlparse(url).hostname or ""
@@ -424,7 +177,7 @@ def _cookie_domain_for(url):
 
     OneTrust reads its consent cookie from the root domain. If the page is on
     shop.example.com but we set the cookie on .shop.example.com, the CMP never
-    sees it and all pixels fire regardless of the chosen scenario.
+    sees it and every tag fires regardless of the chosen scenario.
     """
     h = _host_of(url)
     if not h:
@@ -709,295 +462,6 @@ async def validate_tags(browser, url, index, total):
     finally:
         if context: await context.close()
     return results
-
-async def _capture_pixels_for_scenario(browser, url, scenario):
-    """Load the URL under a single OneTrust consent `scenario` and return
-    {pixel_name: {"count": int, "sources": {}, "ids": set()}} for every
-    marketing pixel that fired.
-
-    Captures via THREE independent paths (CDP + Playwright + Performance API)
-    and uses JS global detection as a last-resort fallback.
-    Source is attributed from the JS initiator stack via CDP."""
-    page_host = _host_of(url)
-    cdp_records = []           # list of {"url", "init":[...], "type", "post"}
-    pw_seen_urls = set()       # Playwright backup: dedup set
-    context = None
-    try:
-        context = await browser.new_context(
-            viewport={'width': 1280, 'height': 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-        )
-
-        # Force the consent scenario via OneTrust cookies (no-op on non-OT sites)
-        dom = _cookie_domain_for(url)
-        if dom:
-            now = datetime.datetime.utcnow()
-            ts = now.strftime("%a+%b+%d+%Y+%H:%M:%S+GMT+0000")
-            optanon = (
-                f"isGpcEnabled=0&datestamp={ts}&version=202401.1.0&isIABGlobal=false"
-                f"&hosts=&consentId=00000000-0000-0000-0000-000000000000"
-                f"&interactionCount=1&landingPath=NotLandingPage"
-                f"&groups={SCENARIO_GROUPS[scenario]}&AwaitingReconsent=false"
-            )
-            try:
-                await context.add_cookies([
-                    {"name": "OptanonConsent", "value": optanon, "domain": dom, "path": "/"},
-                    {"name": "OptanonAlertBoxClosed",
-                     "value": now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-                     "domain": dom, "path": "/"},
-                ])
-            except Exception:
-                pass
-
-        page = await context.new_page()
-        await stealth_obj.apply_stealth_async(page)
-
-        # ---- CDP: capture each request URL with its JS initiator stack ----
-        cdp = None
-        try:
-            cdp = await context.new_cdp_session(page)
-            await cdp.send("Network.enable")
-
-            def on_will_be_sent(params):
-                try:
-                    req = params.get("request", {}) or {}
-                    req_url = req.get("url", "")
-                    if not req_url:
-                        return
-                    init = params.get("initiator", {}) or {}
-                    urls = []
-                    if init.get("url"):
-                        urls.append(init["url"])
-                    cur = init.get("stack") or {}
-                    depth = 0
-                    while cur and depth < 6:
-                        for fr in (cur.get("callFrames") or []):
-                            if fr.get("url"):
-                                urls.append(fr["url"])
-                        cur = cur.get("parent")
-                        depth += 1
-                    cdp_records.append({"url": req_url, "init": urls,
-                                        "type": init.get("type", ""),
-                                        "post": req.get("postData", "") or ""})
-                except Exception:
-                    pass
-
-            cdp.on("Network.requestWillBeSent", on_will_be_sent)
-        except Exception:
-            pass
-
-        # ---- Playwright-level backup capture (catches iframes/workers) ----
-        def on_pw_request(request):
-            try:
-                req_url = request.url
-                if req_url and req_url not in pw_seen_urls:
-                    pw_seen_urls.add(req_url)
-                    pd_str = ""
-                    try: pd_str = request.post_data or ""
-                    except: pass
-                    if not any(r["url"] == req_url for r in cdp_records[-50:]):
-                        cdp_records.append({"url": req_url, "init": [],
-                                            "type": "pw_backup",
-                                            "post": pd_str})
-            except Exception:
-                pass
-        try: page.on("request", on_pw_request)
-        except Exception: pass
-
-        # ---- PASS 1: open the page and APPLY the consent choice ----
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            pass
-
-        await asyncio.sleep(2)
-        action = SCENARIO_ACTION.get(scenario, "accept")
-        if action == "accept":
-            await accept_cookies(page)
-        elif action == "reject":
-            await reject_cookies(page)
-        # 'none' -> leave the banner untouched (pure baseline)
-
-        # Give the CMP a moment to persist the consent (cookie / localStorage)
-        try:
-            await page.wait_for_load_state("networkidle", timeout=8000)
-        except: pass
-        await asyncio.sleep(3)
-
-        # ---- Mark the boundary between PASS 1 and PASS 2 ----
-        # We keep PASS 1 records (some pixels only fire on first visit) and
-        # also capture PASS 2 (return visit with consent state baked in).
-        pass1_count = len(cdp_records)
-
-        # ---- PASS 2: RELOAD with the consent state now in effect ----
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            try:
-                await page.reload(wait_until="domcontentloaded", timeout=30000)
-            except Exception:
-                pass
-
-        await asyncio.sleep(2)
-        # Re-apply the banner choice if the CMP shows it again on reload
-        if action == "accept":
-            await accept_cookies(page)
-        elif action == "reject":
-            await reject_cookies(page)
-
-        try:
-            await page.wait_for_load_state("networkidle", timeout=12000)
-        except: pass
-        await asyncio.sleep(10)    # extended wait for late-loading deferred pixels
-
-        # One more networkidle attempt to catch very late beacons
-        try:
-            await page.wait_for_load_state("networkidle", timeout=5000)
-        except: pass
-
-        # ---- FALLBACK: Performance API ----
-        # Image beacons and CSS-loaded tracking pixels may not appear in CDP
-        # but ARE visible via the Performance Resource Timing API.
-        try:
-            perf_urls = await page.evaluate(
-                "performance.getEntriesByType('resource').map(r => r.name)")
-            for pu in (perf_urls or []):
-                if pu and pu not in pw_seen_urls:
-                    pw_seen_urls.add(pu)
-                    if detect_marketing_pixels(pu):
-                        if not any(r["url"] == pu for r in cdp_records[-100:]):
-                            cdp_records.append({"url": pu, "init": [],
-                                                "type": "perf_api",
-                                                "post": ""})
-        except Exception:
-            pass
-
-        # ---- FALLBACK: JS global pixel objects ----
-        # Some pixels load entirely via inline scripts (createElement('img'),
-        # sendBeacon) which may bypass CDP. If the vendor library initialised,
-        # its global object (fbq, ttq, snaptr…) will exist on window.
-        try:
-            js_code = f"""(() => {{
-                const found = [];
-                {'; '.join(
-                    f"if (typeof window.{g} !== 'undefined') found.push('{pname}')"
-                    for pname, globals_list in PIXEL_JS_GLOBALS.items()
-                    for g in globals_list
-                )};
-                return [...new Set(found)];
-            }})()"""
-            js_detected = await page.evaluate(js_code)
-            for pname in (js_detected or []):
-                cdp_records.append({
-                    "url": f"__js_global_detected__/{pname.replace(' ', '_').replace('/', '_')}",
-                    "init": [], "type": "js_global", "post": ""
-                })
-        except Exception:
-            pass
-
-        # Build the request->initiator graph (first load of each script wins)
-        init_map = {}
-        for rec in cdp_records:
-            if rec["url"] not in init_map:
-                init_map[rec["url"]] = rec["init"]
-
-        pixels = {}
-        for rec in cdp_records:
-            req_url = rec["url"]
-            # Handle JS global detection synthetic records
-            if req_url.startswith("__js_global_detected__/"):
-                raw_name = req_url.split("/", 1)[1].replace("_", " ")
-                matched_name = None
-                for pname in PIXEL_JS_GLOBALS:
-                    norm = pname.replace(" ", " ").replace("/", " ")
-                    if raw_name.replace("_", " ") in norm or norm in raw_name.replace("_", " "):
-                        matched_name = pname
-                        break
-                if not matched_name:
-                    for pname in PIXEL_JS_GLOBALS:
-                        if pname.replace(" ", "_").replace("/", "_") == raw_name:
-                            matched_name = pname
-                            break
-                if matched_name:
-                    bucket = pixels.setdefault(
-                        matched_name, {"count": 0, "sources": {}, "ids": set()})
-                    if bucket["count"] == 0:
-                        bucket["count"] = 1
-                        bucket["sources"]["Detected (JS)"] = 1
-                continue
-
-            for pname in detect_marketing_pixels(req_url):
-                bucket = pixels.setdefault(
-                    pname, {"count": 0, "sources": {}, "ids": set()})
-                bucket["count"] += 1
-
-                pid = extract_pixel_id(pname, req_url, rec.get("post", ""))
-                if pid:
-                    bucket["ids"].add(pid)
-
-                if rec.get("type") == "parser":
-                    # Beacon hardcoded directly in the page HTML markup
-                    src = "Hardcoded"
-                elif rec.get("type") in ("pw_backup", "perf_api"):
-                    # Fallback captures don't have initiator stacks
-                    src = "Hardcoded"
-                else:
-                    src = resolve_source(rec["init"], init_map, page_host)
-                bucket["sources"][src] = bucket["sources"].get(src, 0) + 1
-
-        try: page.remove_listener("request", on_pw_request)
-        except: pass
-        await page.close()
-    except Exception:
-        pixels = locals().get("pixels", {})
-    finally:
-        if context:
-            try: await context.close()
-            except: pass
-    return pixels
-
-
-async def validate_pixels(browser, url, index, total):
-    results = {"URL": url, "Compliance": "PASS", "Error": ""}
-    rich = {"URL": url, "scenarios": {}}
-    try:
-        sys.stdout.write(f"[{index}/{total}] Checking pixels: {url}\n")
-        sys.stdout.flush()
-
-        for sc in SCENARIOS:
-            px = await _capture_pixels_for_scenario(browser, url, sc)
-            total_fires = sum(b["count"] for b in px.values())
-            summary = "; ".join(
-                f"{n}{(' #' + '/'.join(sorted(b['ids']))) if b['ids'] else ''}"
-                f" x{b['count']} [{pick_source(b['sources'])}]"
-                for n, b in sorted(px.items())
-            ) or "None"
-            results[f"{sc}_Pixels"] = summary
-            results[f"{sc}_Count"] = total_fires
-            rich["scenarios"][sc] = [
-                {"name": n, "count": b["count"],
-                 "id": "/".join(sorted(b["ids"])),
-                 "source": pick_source(b["sources"])}
-                for n, b in sorted(px.items())
-            ]
-
-        # Compliance fails if any marketing pixel fires after an explicit
-        # Reject All (consent violation).
-        results["Compliance"] = "FAIL" if results.get("Reject All_Count", 0) > 0 else "PASS"
-
-        sys.stdout.write(
-            f"[{index}/{total}] Done: {url} | "
-            + " ".join(f"{s}:{results[f'{s}_Count']}" for s in SCENARIOS)
-            + f" | {results['Compliance']}\n"
-        )
-        sys.stdout.flush()
-    except Exception as e:
-        results["Error"] = f"Fatal: {str(e)[:80]}"
-        sys.stdout.write(f"[{index}/{total}] [ERROR] {url}\n")
-        sys.stdout.flush()
-    results["_rich"] = rich
-    return results
-
 
 def parse_ga4_event(url, post_data=""):
     """Extract a list of GA4/UA events and their parameters from a collect hit."""
@@ -3001,6 +2465,21 @@ async def validate_clicks(browser, url, index, total):
             ("Pendo",     ["data.pendo.io/data"]),
             ("Quantum Metric", ["cdn.quantummetric.com/qtm", "qm-record"]),
             ("Snowplow",  ["/com.snowplowanalytics.snowplow/", "/snowplow/track"]),
+            # Ad networks: a click that fires one of these is still a tracked
+            # click, and the report should say whose tag it was.
+            ("Meta / Facebook", ["facebook.com/tr", "connect.facebook.net/signals"]),
+            ("Google Ads",      ["googleadservices.com/pagead/conversion",
+                                 "google.com/pagead/1p-user-list", "/pagead/viewthroughconversion"]),
+            ("DoubleClick",     ["doubleclick.net/activity", "ad.doubleclick.net"]),
+            ("LinkedIn",        ["px.ads.linkedin.com", "snap.licdn.com/li.lms-analytics"]),
+            ("TikTok",          ["analytics.tiktok.com", "business-api.tiktok.com/track"]),
+            ("X / Twitter",     ["static.ads-twitter.com", "analytics.twitter.com"]),
+            ("Pinterest",       ["ct.pinterest.com"]),
+            ("Snapchat",        ["tr.snapchat.com"]),
+            ("Reddit",          ["pixel.reddit.com", "alb.reddit.com"]),
+            ("Bing / MS Ads",   ["bat.bing.com/bat", "bat.bing.com/action"]),
+            ("Criteo",          ["static.criteo.net", "sslwidget.criteo.com"]),
+            ("The Trade Desk",  ["insight.adsrvr.org"]),
         ]
 
         def _parse_click_requests(reqs, el_res):
@@ -3055,13 +2534,6 @@ async def validate_clicks(browser, url, index, total):
                             el_res["other_analytics"].append({"vendor": matched_vendor, "url": req["url"][:200]})
                             el_res["has_tracking"] = True
                             el_res["total_requests"] += 1
-                    else:
-                        mp_detected = detect_marketing_pixels(req["url"])
-                        for mp_name in mp_detected:
-                            if not any(o["vendor"] == mp_name for o in el_res["other_analytics"]):
-                                el_res["other_analytics"].append({"vendor": mp_name, "url": req["url"][:200]})
-                                el_res["has_tracking"] = True
-                                el_res["total_requests"] += 1
 
         # ---- PER-CLICK CAPTURE LOOP ----
         # For each element: bookmark request count → click → wait → diff.
@@ -5856,14 +5328,14 @@ async def run_batch(browser, urls_batch, start_index, total, mode=None):
         for i, url in enumerate(urls_batch):
             results.append(await validate_clicks(browser, url, start_index + i, total))
         return results
-    fn = validate_pixels if mode == 'pixels' else validate_tags
+    fn = validate_tags
     tasks = [fn(browser, url, start_index + i, total) for i, url in enumerate(urls_batch)]
     return await asyncio.gather(*tasks)
 
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", help="Mode: 'tealium', 'ga4', 'pixels', 'clicks' or 'sdr'")
+    parser.add_argument("--mode", help="Mode: 'tealium', 'ga4', 'clicks' or 'sdr'")
     parser.add_argument("--sdr", help="Path to SDR Excel file (for --mode sdr)")
     parser.add_argument("--start-url", dest="start_url",
                         help="Start URL for SDR audit (defaults to first http URL found in SDR)")
@@ -6039,11 +5511,6 @@ async def main():
         with open("click_results.json", "w", encoding="utf-8") as f:
             json.dump({"generated": datetime.datetime.now().isoformat(),
                        "results": click_rich}, f, indent=2)
-    elif args.mode == 'pixels':
-        rich = [r.pop("_rich") for r in all_results if "_rich" in r]
-        with open("validation_results.json", "w", encoding="utf-8") as f:
-            json.dump({"generated": datetime.datetime.now().isoformat(),
-                       "scenarios": SCENARIOS, "results": rich}, f, indent=2)
     else:
         for r in all_results:
             r.pop("_rich", None)
@@ -6055,12 +5522,6 @@ async def main():
         res_df[[c for c in cols if c in res_df.columns]].to_excel(output_file, index=False)
     elif args.mode == 'ga4':
         cols = ['URL', 'GTM_Loaded', 'GTM_ID', 'GA4_Fired', 'GA4_Measurement_ID', 'GA4_PageView', 'Error']
-        res_df[[c for c in cols if c in res_df.columns]].to_excel(output_file, index=False)
-    elif args.mode == 'pixels':
-        cols = ['URL']
-        for sc in SCENARIOS:
-            cols += [f'{sc}_Count', f'{sc}_Pixels']
-        cols += ['Compliance', 'Error']
         res_df[[c for c in cols if c in res_df.columns]].to_excel(output_file, index=False)
     elif args.mode == 'clicks':
         cols = ['URL', 'Total_Elements', 'With_Tracking', 'Without_Tracking', 'Skipped', 'Error']
