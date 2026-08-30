@@ -3821,6 +3821,96 @@ def _sdr_clean(v):
     return '' if s.lower() in SDR_SKIP_VALUES else s
 
 
+def _sdr_norm_header(h):
+    """A header reduced to comparable words.
+
+    Different teams write the same column a dozen ways: "GA4 Event Name",
+    "event_name", "ga4_event". Lower-casing, dropping any "(link_url)" hint and
+    flattening punctuation to spaces makes all of them comparable, so column
+    detection is not tied to one house style.
+    """
+    t = str(h or '').strip().lower()
+    t = re.sub(r'\(.*?\)', ' ', t)
+    t = re.sub(r'[^a-z0-9]+', ' ', t)
+    return re.sub(r'\s+', ' ', t).strip()
+
+
+# For each structural column: the exact names to prefer, then looser words to
+# fall back on. Exact wins first so that "current_page_url" is not mistaken
+# for the page URL column and "event_category" is not mistaken for the event.
+_SDR_COLUMN_RULES = {
+    'url':   (['page url', 'url', 'page', 'page link', 'landing page'],
+              ['page url']),
+    'loc':   (['location', 'section', 'placement', 'area', 'position'],
+              ['location', 'placement']),
+    'ctype': (['click type', 'event type', 'interaction type', 'type',
+               'interaction', 'action type'],
+              ['click type', 'interaction']),
+    'name':  (['link button name', 'button name', 'element name', 'link name',
+               'name', 'element', 'link', 'cta name', 'component name'],
+              ['button name', 'element name', 'link name']),
+    'event': (['ga4 event name', 'ga4 event', 'event name', 'event',
+               'ga4 event link', 'ga4 events', 'event id'],
+              ['ga4 event', 'event name']),
+}
+
+# Columns that describe the QA process rather than the tag being tested.
+_SDR_NON_PARAM = ('qa', 'comment', 'note', 'status', 'jira', 'ticket', 'owner',
+                  'dev', 'remark', 'issue', 'bug', 'priority')
+
+
+def _sdr_pick_columns(headers):
+    """Work out which column is which, for any SDR layout.
+
+    Structural columns are matched on exact normalised names first and only
+    then on looser words. Everything left over that has a header and is not
+    about the QA process is treated as an expected parameter, named by its own
+    header — which is how a sheet whose columns are simply `event_category`
+    and `event_label`, with no "(param)" annotation anywhere, still works.
+    """
+    norm = [_sdr_norm_header(h) for h in headers]
+    picked, taken = {}, set()
+
+    for key, (exact, loose) in _SDR_COLUMN_RULES.items():
+        found = 0
+        for want in exact:
+            for i, h in enumerate(norm):
+                if h == want and (i + 1) not in taken:
+                    found = i + 1
+                    break
+            if found:
+                break
+        if not found:
+            for want in loose:
+                for i, h in enumerate(norm):
+                    if want in h and (i + 1) not in taken:
+                        found = i + 1
+                        break
+                if found:
+                    break
+        if found:
+            picked[key] = found
+            taken.add(found)
+
+    param_cols, qa_cols = {}, {}
+    for i, raw in enumerate(headers):
+        col = i + 1
+        if col in taken or not str(raw).strip():
+            continue
+        low = str(raw).strip().lower()
+        if any(w in low for w in _SDR_NON_PARAM):
+            if 'qa' in low:
+                qa_cols[str(raw).strip()] = col
+            continue
+        # An explicit "(link_url)" annotation names the parameter; otherwise
+        # the header itself is the parameter name.
+        m = re.search(r'\(([a-z_][a-z0-9_ ]*)\)\s*$', low)
+        pname = (m.group(1) if m else _sdr_norm_header(raw)).strip().replace(' ', '_')
+        if pname:
+            param_cols[col] = pname
+    return picked, param_cols, qa_cols
+
+
 def _sdr_find_header_row(ws, max_scan=8):
     """Locate the real header row.
 
@@ -3860,10 +3950,14 @@ def _sdr_header_row_from_grid(grid, max_scan=8):
     for r in range(1, min(max_scan, len(grid)) + 1):
         vals = [str(v or '').strip().lower() for v in grid[r - 1]]
         joined = ' | '.join(vals)
+        # Score a row on how many structural columns it looks like it names.
+        # Written against normalised names so a sheet headed "url /
+        # Element Name / event_name" scores as highly as the house template.
+        cells = [_sdr_norm_header(v) for v in grid[r - 1]]
         score = 0
-        for needle in ('page url', 'location', 'click type', 'link/button name',
-                       'ga4 event', 'event type'):
-            if needle in joined:
+        for _key, (exact, loose) in _SDR_COLUMN_RULES.items():
+            if any(c == w for c in cells for w in exact) or \
+                    any(w in c for c in cells for w in loose):
                 score += 1
         if score > best_score:
             best, best_score = r, score
@@ -3888,16 +3982,14 @@ def list_sdr_sheets(sdr_path):
             hr = _sdr_header_row_from_grid(grid)
             hdr = [str(v or '').strip() for v in (grid[hr - 1] if hr <= len(grid) else ())]
             low = [h.lower() for h in hdr]
-
-            def idx(*needles):
-                for i, h in enumerate(low):
-                    if any(n in h for n in needles):
-                        return i + 1
-                return 0
-
-            c_url = idx('page url') or 1
-            c_name = idx('link/button name', 'link/button', 'button name') or 4
-            c_ev = idx('ga4 event', 'event name') or 5
+            cols, p_cols, _qa = _sdr_pick_columns(hdr)
+            c_url = cols.get('url') or 1
+            c_name = cols.get('name') or 0
+            c_ev = cols.get('event') or 0
+            if not c_ev:
+                out.append({"name": ws.title, "header_row": hr, "testable_rows": 0,
+                            "page_urls": [], "qa_columns": [h for h in hdr if 'qa' in h.lower()]})
+                continue
             rows, urls, last = 0, [], ''
             for r in range(hr + 1, len(grid) + 1):
                 u = _sdr_clean(_sdr_cellv(grid, r, c_url))
@@ -3907,10 +3999,8 @@ def list_sdr_sheets(sdr_path):
                 ev = _sdr_clean(_sdr_cellv(grid, r, c_ev))
                 # Count on any identifier — the name column is blank
                 # throughout some sheets.
-                ident = nm or any(
-                    _sdr_clean(_sdr_cellv(grid, r, cc + 1))
-                    for cc, h in enumerate(low)
-                    if 'link text' in h or 'link url' in h)
+                ident = nm or any(_sdr_clean(_sdr_cellv(grid, r, cc))
+                                  for cc in p_cols)
                 if ident and ev:
                     rows += 1
                     if last and last not in urls:
@@ -3959,31 +4049,12 @@ def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
     headers = [str(v or '').strip() for v in (grid[hr - 1] if hr <= len(grid) else ())]
     low = [h.lower() for h in headers]
 
-    def col_of(*needles):
-        for i, h in enumerate(low):
-            if any(n in h for n in needles):
-                return i + 1
-        return 0
-
-    c_url = col_of('page url') or 1
-    c_loc = col_of('location')
-    c_type = col_of('click type', 'event type')
-    c_name = col_of('link/button name', 'link/button', 'button name')
-    c_event = col_of('ga4 event name', 'ga4 event', 'event name')
-
-    # Columns that declare a GA4 parameter, e.g. "Link URL (link_url)".
-    param_cols = {}
-    for i, h in enumerate(headers):
-        m = re.search(r'\(([a-z_][a-z0-9_ ]*)\)\s*$', h.strip().lower())
-        if m:
-            pname = m.group(1).strip().replace(' ', '_')
-            if pname and (i + 1) not in (c_url, c_loc, c_type, c_name, c_event):
-                param_cols[i + 1] = pname
-
-    qa_cols = {}
-    for i, h in enumerate(headers):
-        if 'qa' in h.lower():
-            qa_cols[h] = i + 1
+    cols, param_cols, qa_cols = _sdr_pick_columns(headers)
+    c_url = cols.get('url') or 1
+    c_loc = cols.get('loc') or 0
+    c_type = cols.get('ctype') or 0
+    c_name = cols.get('name') or 0
+    c_event = cols.get('event') or 0
 
     cases = []
     last_url = ''
