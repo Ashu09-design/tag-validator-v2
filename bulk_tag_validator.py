@@ -1155,7 +1155,9 @@ def parse_adobe_websdk_event(post_data):
 
 DISCOVER_CLICKABLES_JS = r"""
 (() => {
-    const seen = new Set();
+    // key -> {el, idx}: the copy of a link kept for this key, and where it
+    // sits in results, so a later copy can take its place (see below).
+    const seen = new Map();
     const results = [];
 
     // Tags that are inherently interactive — clicks on these are meaningful.
@@ -1524,8 +1526,31 @@ DISCOVER_CLICKABLES_JS = r"""
             const key = (textKey
                 ? 'T:' + textKey + '|H:' + hrefKey
                 : (el.tagName + '|H:' + hrefKey + '|I:' + (el.id || ''))) + '|Z:' + zone;
-            if (seen.has(key)) return;
-            seen.add(key);
+            // Responsive navs commonly render the SAME link twice: one copy
+            // for the desktop bar and one for the mobile drawer, only one of
+            // which is laid out. Keeping whichever came first in the DOM can
+            // keep the copy with no box at all — it is then unreachable, the
+            // audit falls back to the wrapper, and clicking the wrapper's
+            // centre hits a SIBLING link. That is how a row for "Children with
+            // Spasticity" ended up reporting "Adults with Spasticity". So on a
+            // duplicate, prefer the copy that is actually laid out.
+            const boxed = (n) => {
+                try {
+                    const r = n.getBoundingClientRect();
+                    if (r.width > 2 && r.height > 2) return true;
+                    for (const c of n.getClientRects()) {
+                        if (c.width > 2 && c.height > 2) return true;
+                    }
+                } catch (e) {}
+                return false;
+            };
+            let replaceIdx = -1;
+            const prior = seen.get(key);
+            if (prior) {
+                if (!boxed(prior.el) && boxed(el)) replaceIdx = prior.idx;
+                else return;
+            }
+            seen.set(key, {el: el, idx: replaceIdx >= 0 ? replaceIdx : results.length});
 
             // STAMP a unique, stable handle straight onto the node. The click
             // loop locates elements by [data-tvuid="..."] instead of a CSS
@@ -1638,7 +1663,7 @@ DISCOVER_CLICKABLES_JS = r"""
                 }
             } catch (e) {}
 
-            results.push({
+            const record = {
                 selector: buildSelector(el),
                 uid: uid,
                 context: context,
@@ -1653,7 +1678,9 @@ DISCOVER_CLICKABLES_JS = r"""
                 is_download: !!isDownload,
                 target: (el.getAttribute && el.getAttribute('target')) || '',
                 className: (typeof el.className === 'string') ? el.className.substring(0, 100) : '',
-            });
+            };
+            if (replaceIdx >= 0) results[replaceIdx] = record;
+            else results.push(record);
         } catch(e) {}
     });
 
@@ -1794,6 +1821,27 @@ BLOCK_NAVIGATION_JS = r"""
 # element. Nothing is hidden or removed, and it is put back immediately after.
 PIERCE_OVERLAY_JS = r"""
 (e) => {
+    // An element can render text and still report an empty box: `display:
+    // contents` generates no box of its own, and some nav markup relies on
+    // it. Measuring only getBoundingClientRect() declares a perfectly visible
+    // link unreachable, the audit falls back to its wrapper, and clicking the
+    // wrapper hits whichever sibling sits under its centre — which is how a
+    // row for "Children with Spasticity" ended up reporting "Adults with
+    // Spasticity". Fall back to the element's own client rects, then to its
+    // first child that does have a box.
+    const rectOf = (n) => {
+        let r = n.getBoundingClientRect();
+        if (r.width > 2 && r.height > 2) return r;
+        for (const c of n.getClientRects()) {
+            if (c.width > 2 && c.height > 2) return c;
+        }
+        for (const k of n.children) {
+            const kr = k.getBoundingClientRect();
+            if (kr.width > 2 && kr.height > 2) return kr;
+        }
+        return r;
+    };
+
     // Always undo a previous pierce first. If an earlier one never got its
     // restore (an exception between click and cleanup), overwriting the
     // bookkeeping list would strand those nodes with pointer-events:none for
@@ -1806,7 +1854,7 @@ PIERCE_OVERLAY_JS = r"""
     } catch (err) {}
     window.__tvPierced = [];
 
-    const r = e.getBoundingClientRect();
+    const r = rectOf(e);
     if (!r.width || !r.height) return {ok: false, reason: 'no-box'};
     const pts = [
         [r.x + r.width / 2,    r.y + r.height / 2],
@@ -5188,8 +5236,20 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 hit = None
                 try:
                     hit = await loc_el.evaluate("""(e) => {
-                        const r = e.getBoundingClientRect();
-                        if (!r.width || !r.height) return {ok: false};
+                        const rectOf = (n) => {
+                            let q = n.getBoundingClientRect();
+                            if (q.width > 2 && q.height > 2) return q;
+                            for (const c of n.getClientRects()) {
+                                if (c.width > 2 && c.height > 2) return c;
+                            }
+                            for (const k of n.children) {
+                                const kr = k.getBoundingClientRect();
+                                if (kr.width > 2 && kr.height > 2) return kr;
+                            }
+                            return q;
+                        };
+                        const r = rectOf(e);
+                        if (!r.width || !r.height) return {ok: false, reason: 'no-box'};
                         const c = [[r.x + r.width/2, r.y + r.height/2],
                                    [r.x + r.width*0.25, r.y + r.height/2],
                                    [r.x + r.width*0.75, r.y + r.height/2]];
@@ -5212,13 +5272,43 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 # top of the page it measures zero and cannot be clicked.
                 # Move down the page and look again before giving up on it.
                 if hit and not hit.get("ok") and hit.get("reason") == "no-box":
+                    # A control with no box is not necessarily absent. Two
+                    # different situations produce it, and both are ordinary:
+                    # the navigation is collapsed behind a menu button (every
+                    # nav link then measures zero), or the control only
+                    # materialises once the page has been scrolled. Try
+                    # opening the menu first, then moving down the page.
+                    try:
+                        await page.evaluate(EXPOSE_HIDDEN_JS)
+                        await page.evaluate("""() => {
+                            const sels = [
+                                'button[aria-label*="menu" i]', 'button[aria-label*="navigation" i]',
+                                'button[class*="hamburger" i]', 'button[class*="menu-toggle" i]',
+                                'button[class*="nav-toggle" i]', 'button[class*="navbar-toggle" i]',
+                                '[aria-haspopup="true"]', 'button[aria-expanded="false"]',
+                                '[class*="menu-icon" i]', '[class*="burger" i]'];
+                            for (const sel of sels) {
+                                for (const n of document.querySelectorAll(sel)) {
+                                    const r = n.getBoundingClientRect();
+                                    if (r.width < 3 || r.height < 3) continue;
+                                    const blob = ((n.id || '') + ' ' +
+                                        (typeof n.className === 'string' ? n.className : '')).toLowerCase();
+                                    if (/cookie|consent|onetrust|optanon|privacy/.test(blob)) continue;
+                                    try { n.click(); } catch (e) {}
+                                }
+                            }
+                        }""")
+                        await asyncio.sleep(0.9)
+                        hit = await loc_el.evaluate(PIERCE_OVERLAY_JS)
+                    except Exception:
+                        pass
                     for depth in (900, 2000, 4000):
+                        if hit and hit.get("ok"):
+                            break
                         try:
                             await page.evaluate("window.scrollTo(0, %d)" % depth)
                             await asyncio.sleep(0.7)
                             hit = await loc_el.evaluate(PIERCE_OVERLAY_JS)
-                            if hit and hit.get("ok"):
-                                break
                         except Exception:
                             break
                     el_res_blocked = ((hit or {}).get("reason")
