@@ -16,15 +16,15 @@ function colorizeLogLines(logs) {
         const text = String(l);
         let colorStyle = '';
         if (text.includes('ERROR') || text.includes('failed') || text.includes('failed with code') || text.includes('rejected')) {
-            colorStyle = 'color: #f87171; text-shadow: 0 0 6px rgba(248, 113, 113, 0.4);';
+            colorStyle = 'color: var(--c-bad); text-shadow: 0 0 6px rgba(248, 113, 113, 0.4);';
         } else if (text.includes('WARNING') || text.includes('WARN')) {
-            colorStyle = 'color: #fbbf24; text-shadow: 0 0 6px rgba(251, 191, 36, 0.4);';
+            colorStyle = 'color: var(--c-warn); text-shadow: 0 0 6px rgba(251, 191, 36, 0.4);';
         } else if (text.includes('SUCCESS') || text.includes('Finished') || text.includes('Completed') || text.includes('Saved report')) {
-            colorStyle = 'color: #34d399; text-shadow: 0 0 6px rgba(52, 211, 153, 0.4);';
+            colorStyle = 'color: var(--c-ok); text-shadow: 0 0 6px rgba(52, 211, 153, 0.4);';
         } else if (text.includes('[Crawl]') || text.includes('CRAWLING') || text.includes('Discovering')) {
-            colorStyle = 'color: #22d3ee; text-shadow: 0 0 6px rgba(34, 211, 238, 0.4);';
+            colorStyle = 'color: var(--c-teal); text-shadow: 0 0 6px rgba(34, 211, 238, 0.4);';
         } else if (text.includes('[Audit]') || text.includes('Auditing') || text.includes('Quick Run:')) {
-            colorStyle = 'color: #c084fc; text-shadow: 0 0 6px rgba(192, 132, 252, 0.4);';
+            colorStyle = 'color: var(--c-purple); text-shadow: 0 0 6px rgba(192, 132, 252, 0.4);';
         }
         
         const styleAttr = colorStyle ? ` style="${colorStyle}"` : '';
@@ -33,7 +33,7 @@ function colorizeLogLines(logs) {
 }
 
 function formatSingleGa4Event(e) {
-    if (!e) return '<span style="color:#64748b">--</span>';
+    if (!e) return '<span style="color:var(--muted)">--</span>';
     // One event can be sent to several GA4 properties at once (dual tagging).
     // Show each property id as its own chip so a single click doesn't look
     // like it fired the same event two or three separate times.
@@ -42,19 +42,19 @@ function formatSingleGa4Event(e) {
         : (e.measurement_id ? [e.measurement_id] : []);
     const chip = (id) => {
         const isApi = String(id).startsWith('(');
-        const bg = isApi ? 'rgba(168,85,247,0.12)' : 'rgba(59,130,246,0.12)';
-        const fg = isApi ? '#c4b5fd' : '#60a5fa';
-        const bd = isApi ? 'rgba(168,85,247,0.35)' : 'rgba(59,130,246,0.35)';
+        const bg = isApi ? 'var(--t-purple)' : 'var(--t-info)';
+        const fg = isApi ? 'var(--c-purple)' : 'var(--c-info)';
+        const bd = isApi ? 'var(--e-purple)' : 'var(--e-info)';
         return `<span class="badge" style="background:${bg};color:${fg};border:1px solid ${bd};margin:0 3px 4px 0;display:inline-block;font-family:monospace;font-size:0.65rem;">${escapeHtml(id)}</span>`;
     };
     const measId = ids.map(chip).join('');
     const hits = (e.hit_count && e.hit_count > 1)
-        ? `<span style="color:#64748b;font-size:0.65rem"> ×${e.hit_count}</span>` : '';
-    let s = `<div style="margin-bottom:4px;">${measId}<br><b style="color:#4ade80">${escapeHtml(e.event)}</b>${hits}</div>`;
+        ? `<span style="color:var(--muted);font-size:0.65rem"> ×${e.hit_count}</span>` : '';
+    let s = `<div style="margin-bottom:4px;">${measId}<br><b style="color:var(--c-ok)">${escapeHtml(e.event)}</b>${hits}</div>`;
     const pkeys = Object.keys(e.params || {});
     if (pkeys.length) {
         s += `<div class="event-params">` +
-             pkeys.map(k => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${escapeHtml(k)}</span>: <span style="color:#38bdf8">${escapeHtml(String(e.params[k]))}</span></div>`).join('') +
+             pkeys.map(k => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:var(--muted)">${escapeHtml(k)}</span>: <span style="color:var(--c-info)">${escapeHtml(String(e.params[k]))}</span></div>`).join('') +
              `</div>`;
     }
     return s;
@@ -77,19 +77,19 @@ function switchTab(tabId) {
 function formatElementType(tag) {
     const t = (tag || '').toUpperCase();
     const typeMap = {
-        'A': { label: 'Link', bg: 'rgba(96,165,250,0.12)', color: '#60a5fa', border: 'rgba(96,165,250,0.35)' },
-        'BUTTON': { label: 'Button', bg: 'rgba(34,197,94,0.12)', color: '#4ade80', border: 'rgba(34,197,94,0.35)' },
-        'INPUT': { label: 'Input', bg: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: 'rgba(251,191,36,0.35)' },
-        'SELECT': { label: 'Select', bg: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: 'rgba(251,191,36,0.35)' },
-        'TEXTAREA': { label: 'Textarea', bg: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: 'rgba(251,191,36,0.35)' },
-        'FORM': { label: 'Form', bg: 'rgba(168,85,247,0.12)', color: '#a78bfa', border: 'rgba(168,85,247,0.35)' },
-        'VIDEO': { label: 'Video', bg: 'rgba(236,72,153,0.12)', color: '#ec4899', border: 'rgba(236,72,153,0.35)' },
-        'AUDIO': { label: 'Audio', bg: 'rgba(236,72,153,0.12)', color: '#ec4899', border: 'rgba(236,72,153,0.35)' },
-        'SUMMARY': { label: 'Toggle', bg: 'rgba(139,92,246,0.12)', color: '#a78bfa', border: 'rgba(139,92,246,0.35)' },
-        'AREA': { label: 'Area', bg: 'rgba(96,165,250,0.12)', color: '#60a5fa', border: 'rgba(96,165,250,0.35)' },
-        'LABEL': { label: 'Label', bg: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: 'rgba(251,191,36,0.35)' },
+        'A': { label: 'Link', bg: 'var(--t-info)', color: 'var(--c-info)', border: 'var(--e-info)' },
+        'BUTTON': { label: 'Button', bg: 'rgba(34,197,94,0.12)', color: 'var(--c-ok)', border: 'rgba(34,197,94,0.35)' },
+        'INPUT': { label: 'Input', bg: 'var(--t-warn)', color: 'var(--c-warn)', border: 'var(--e-warn)' },
+        'SELECT': { label: 'Select', bg: 'var(--t-warn)', color: 'var(--c-warn)', border: 'var(--e-warn)' },
+        'TEXTAREA': { label: 'Textarea', bg: 'var(--t-warn)', color: 'var(--c-warn)', border: 'var(--e-warn)' },
+        'FORM': { label: 'Form', bg: 'var(--t-purple)', color: 'var(--c-purple)', border: 'var(--e-purple)' },
+        'VIDEO': { label: 'Video', bg: 'var(--t-pink)', color: 'var(--c-pink)', border: 'var(--e-pink)' },
+        'AUDIO': { label: 'Audio', bg: 'var(--t-pink)', color: 'var(--c-pink)', border: 'var(--e-pink)' },
+        'SUMMARY': { label: 'Toggle', bg: 'rgba(139,92,246,0.12)', color: 'var(--c-purple)', border: 'rgba(139,92,246,0.35)' },
+        'AREA': { label: 'Area', bg: 'var(--t-info)', color: 'var(--c-info)', border: 'var(--e-info)' },
+        'LABEL': { label: 'Label', bg: 'var(--t-warn)', color: 'var(--c-warn)', border: 'var(--e-warn)' },
     };
-    const info = typeMap[t] || { label: t, bg: 'rgba(139,92,246,0.1)', color: '#a78bfa', border: 'rgba(139,92,246,0.3)' };
+    const info = typeMap[t] || { label: t, bg: 'rgba(139,92,246,0.1)', color: 'var(--c-purple)', border: 'rgba(139,92,246,0.3)' };
     return `<span class="badge" style="background:${info.bg};color:${info.color};border:1px solid ${info.border}">${info.label}</span>`;
 }
 
@@ -340,14 +340,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('testEmailBtn').onclick = async () => {
         const flash = document.getElementById('schFlash');
-        flash.style.color = '#5eead4';
+        flash.style.color = 'var(--c-teal)';
         flash.innerText = 'Sending test email...';
         const r = await fetch('/api/test-email', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email: document.getElementById('scheduleEmail').value.trim() }),
         });
         const j = await r.json();
-        flash.style.color = r.ok ? '#5eead4' : '#f87171';
+        flash.style.color = r.ok ? 'var(--c-teal)' : 'var(--c-bad)';
         flash.innerText = r.ok ? j.message : ('Error: ' + j.error);
     };
 
@@ -356,7 +356,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const d = await (await fetch('/api/mail-config')).json();
             const el = document.getElementById('mailState');
             if (d.configured) {
-                el.innerHTML = `✅ Sending as <b style="color:#5eead4">${d.sender}</b>`;
+                el.innerHTML = `✅ Sending as <b style="color:var(--c-teal)">${d.sender}</b>`;
                 document.getElementById('brevoSender').value = d.sender || '';
             } else {
                 el.innerHTML = '⚠ Not configured — alerts will be skipped';
@@ -368,13 +368,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const sender = document.getElementById('brevoSender').value.trim();
         const apiKey = document.getElementById('brevoKey').value.trim();
         const flash = document.getElementById('schFlash');
-        if (!sender || !apiKey) { flash.style.color = '#f87171'; flash.innerText = 'Enter sender email + Brevo API key'; return; }
+        if (!sender || !apiKey) { flash.style.color = 'var(--c-bad)'; flash.innerText = 'Enter sender email + Brevo API key'; return; }
         const r = await fetch('/api/mail-config', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sender, apiKey }),
         });
         const j = await r.json();
-        flash.style.color = r.ok ? '#5eead4' : '#f87171';
+        flash.style.color = r.ok ? 'var(--c-teal)' : 'var(--c-bad)';
         flash.innerText = r.ok ? 'Email settings saved' : ('Error: ' + j.error);
         document.getElementById('brevoKey').value = '';
         refreshMailState();
@@ -415,7 +415,7 @@ function renderTable() {
                 <th>#</th><th>URL</th>
                 <th style="text-align:center">Elements</th>
                 <th class="h-teal" style="text-align:center">With Tracking</th>
-                <th style="text-align:center; color:#f87171">No Tracking</th>
+                <th style="text-align:center; color:var(--c-bad)">No Tracking</th>
                 <th>Details</th>
             </tr>
         `;
@@ -447,13 +447,13 @@ function renderTable() {
             <tr>
                 <th rowspan="2">#</th><th rowspan="2">URL</th>
                 <th colspan="2" class="h-adobe" style="text-align:center; background:rgba(255,255,255,0.05)">GTM</th>
-                <th colspan="3" class="h-adobe" style="text-align:center; background: rgba(59, 130, 246, 0.15); color: #60a5fa;">GA4</th>
+                <th colspan="3" class="h-adobe" style="text-align:center; background: var(--t-info); color: var(--c-info);">GA4</th>
             </tr>
             <tr>
-                <th style="background:rgba(255,255,255,0.03)">Loaded</th><th style="background:rgba(255,255,255,0.03)">GTM ID</th>
-                <th class="h-adobe" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa;">Fired</th>
-                <th class="h-adobe" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa;">Measurement ID</th>
-                <th class="h-adobe" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa;">Page View</th>
+                <th style="background:var(--surface-3)">Loaded</th><th style="background:var(--surface-3)">GTM ID</th>
+                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Fired</th>
+                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Measurement ID</th>
+                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Page View</th>
             </tr>
         `;
     }
@@ -481,29 +481,29 @@ function renderTable() {
         const untracked = cachedResults.reduce((a, r) => a + (Number(r.Without_Tracking) || 0), 0);
         const accuracy = totalEl ? Math.round((tracked / totalEl) * 100) : 100;
         statsBar.innerHTML = `
-            <div class="stat"><div class="stat-dot" style="background:#60a5fa;color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${totalEl}</div><div class="stat-lbl">Total Elements Clicked</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:var(--c-info);color:var(--c-info);"></div><div><div class="stat-val" style="color:var(--c-info-2);">${totalEl}</div><div class="stat-lbl">Total Elements Clicked</div></div></div>
             <div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${tracked}</div><div class="stat-lbl">With Analytics Tracking</div></div></div>
-            <div class="stat"><div class="stat-dot" style="background:#ef4444;color:#ef4444;"></div><div><div class="stat-val" style="color:#f87171;">${untracked}</div><div class="stat-lbl">No Tracking Detected</div></div></div>
-            <div class="stat"><div class="stat-dot" style="background:#c084fc;color:#c084fc;"></div><div><div class="stat-val" style="color:#e9d5ff;">${accuracy}%</div><div class="stat-lbl">Tracking Accuracy</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:var(--c-bad);color:var(--c-bad);"></div><div><div class="stat-val" style="color:var(--c-bad);">${untracked}</div><div class="stat-lbl">No Tracking Detected</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:var(--c-purple);color:var(--c-purple);"></div><div><div class="stat-val" style="color:var(--c-purple);">${accuracy}%</div><div class="stat-lbl">Tracking Accuracy</div></div></div>
         `;
     } else if (currentAuditMode === 'pixels') {
         const fires = cachedResults.reduce((a, r) => a + (Number(r[currentScenario + '_Count']) || 0), 0);
         statsBar.innerHTML = `
-            <div class="stat"><div class="stat-dot" style="background:#60a5fa;color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${fires}</div><div class="stat-lbl">Pixel Fires · ${currentScenario}</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:var(--c-info);color:var(--c-info);"></div><div><div class="stat-val" style="color:var(--c-info-2);">${fires}</div><div class="stat-lbl">Pixel Fires · ${currentScenario}</div></div></div>
             <div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${st.compliant}/${cachedResults.length}</div><div class="stat-lbl">Compliant (no pixels on Reject All)</div></div></div>
-            <div class="stat"><div class="stat-dot" style="background:#ef4444;color:#ef4444;"></div><div><div class="stat-val" style="color:#f87171;">${st.violations}/${cachedResults.length}</div><div class="stat-lbl">Violations (pixels after Reject All)</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:var(--c-bad);color:var(--c-bad);"></div><div><div class="stat-val" style="color:var(--c-bad);">${st.violations}/${cachedResults.length}</div><div class="stat-lbl">Violations (pixels after Reject All)</div></div></div>
         `;
     } else if (currentAuditMode === 'tealium') {
         statsBar.innerHTML = `<div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${st.teal}/${cachedResults.length}</div><div class="stat-lbl">Tealium Detected</div></div></div>`;
     } else {
         statsBar.innerHTML = `
             <div class="stat"><div class="stat-dot dot-adobe"></div><div><div class="stat-val val-adobe">${st.adobe}/${cachedResults.length}</div><div class="stat-lbl">Adobe Detected</div></div></div>
-            <div class="stat"><div class="stat-dot" style="background:#60a5fa; color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${st.ga4}/${cachedResults.length}</div><div class="stat-lbl">GA4 Detected</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:var(--c-info); color:var(--c-info);"></div><div><div class="stat-val" style="color:var(--c-info-2);">${st.ga4}/${cachedResults.length}</div><div class="stat-lbl">GA4 Detected</div></div></div>
         `;
     }
 
     const PIX = v => (!v || v === 'None')
-        ? '<span style="color:#64748b">None</span>'
+        ? '<span style="color:var(--muted)">None</span>'
         : '<span class="mono" style="white-space:normal">' + v + '</span>';
 
     if (currentAuditMode === 'clicks') {
@@ -519,7 +519,7 @@ function renderTable() {
                 <td class="url-col" title="${r.URL}">${r.URL}</td>
                 <td style="text-align:center"><span class="badge b-count">${r.Total_Elements || 0}</span></td>
                 <td style="text-align:center"><span class="badge b-pass">${r.With_Tracking || 0}</span></td>
-                <td style="text-align:center">${(r.Without_Tracking || 0) > 0 ? '<span class="badge b-fail">' + r.Without_Tracking + '</span>' : '<span style="color:#64748b">0</span>'}</td>
+                <td style="text-align:center">${(r.Without_Tracking || 0) > 0 ? '<span class="badge b-fail">' + r.Without_Tracking + '</span>' : '<span style="color:var(--muted)">0</span>'}</td>
                 <td><span style="font-size:0.7rem;color:var(--accent);cursor:pointer">▶ Expand</span></td>
             </tr>`;
             // Expandable detail row
@@ -537,15 +537,15 @@ function renderTable() {
                     let ga4_3 = formatSingleGa4Event(el.ga4_events[2]);
                     if (el.ga4_events.length > 3) {
                         for (let k = 3; k < el.ga4_events.length; k++) {
-                            ga4_3 += '<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">' + formatSingleGa4Event(el.ga4_events[k]);
+                            ga4_3 += '<hr style="border-color:var(--border);margin:8px 0">' + formatSingleGa4Event(el.ga4_events[k]);
                         }
                     }
                         
                     const aaHtml = el.adobe_calls.length
                         ? el.adobe_calls.map(c => {
                             const displayName = c.link_name || c.events || c.link_type || 'adobe_call';
-                            const rsid = c.report_suite ? '<span class="badge" style="background:rgba(251,146,60,0.12);color:#fdba74;border:1px solid rgba(251,146,60,0.35);margin-bottom:4px;display:inline-block;font-family:monospace;font-size:0.6rem;">' + c.report_suite + '</span><br>' : '';
-                            let s = '<div style="margin-bottom:6px;">' + rsid + '<b style="color:#fdba74">' + displayName + '</b> <span style="color:#94a3b8;font-size:0.7rem">(' + c.link_type + ')</span>';
+                            const rsid = c.report_suite ? '<span class="badge" style="background:var(--t-orange);color:var(--c-orange);border:1px solid var(--e-orange);margin-bottom:4px;display:inline-block;font-family:monospace;font-size:0.6rem;">' + c.report_suite + '</span><br>' : '';
+                            let s = '<div style="margin-bottom:6px;">' + rsid + '<b style="color:var(--c-orange)">' + displayName + '</b> <span style="color:var(--muted);font-size:0.7rem">(' + c.link_type + ')</span>';
                             
                             const items = [];
                             if (c.events) items.push({ k: 'events', v: c.events });
@@ -554,26 +554,26 @@ function renderTable() {
                             
                             if (items.length) {
                                 s += `<div class="event-params">` + 
-                                     items.map(item => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${item.k}</span>: <span style="color:#fb923c">${item.v}</span></div>`).join('') + 
+                                     items.map(item => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:var(--muted)">${item.k}</span>: <span style="color:var(--c-orange)">${item.v}</span></div>`).join('') + 
                                      `</div>`;
                             }
                             s += '</div>';
                             return s;
-                        }).join('<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">')
+                        }).join('<hr style="border-color:var(--border);margin:8px 0">')
                         : (el.adobe_websdk && el.adobe_websdk.length
-                            ? el.adobe_websdk.map(w => '<b style="color:#fdba74">' + w.event_type + '</b>').join('<br>')
+                            ? el.adobe_websdk.map(w => '<b style="color:var(--c-orange)">' + w.event_type + '</b>').join('<br>')
                             : '');
 
                     const otherHtml = el.other_analytics && el.other_analytics.length
-                        ? el.other_analytics.map(o => `<div style="margin-bottom:4px;"><span class="badge" style="background:rgba(168,85,247,0.12);color:#c4b5fd;border:1px solid rgba(168,85,247,0.35);">${o.vendor}</span></div>`).join('')
+                        ? el.other_analytics.map(o => `<div style="margin-bottom:4px;"><span class="badge" style="background:var(--t-purple);color:var(--c-purple);border:1px solid var(--e-purple);">${o.vendor}</span></div>`).join('')
                         : '';
                     
                     let combinedAdobeOther = aaHtml;
                     if (otherHtml) {
-                        if (combinedAdobeOther) combinedAdobeOther += '<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">';
+                        if (combinedAdobeOther) combinedAdobeOther += '<hr style="border-color:var(--border);margin:8px 0">';
                         combinedAdobeOther += otherHtml;
                     }
-                    if (!combinedAdobeOther) combinedAdobeOther = '<span style="color:#64748b">--</span>';
+                    if (!combinedAdobeOther) combinedAdobeOther = '<span style="color:var(--muted)">--</span>';
 
                     const elLabel = el.element.id ? '#' + el.element.id : el.element.selector.substring(0, 40);
                     const trackIcon = el.skipped ? '⏭️' : (el.has_tracking ? '✅' : '⚠️');
@@ -582,13 +582,13 @@ function renderTable() {
                     // click actually reached the intended element.
                     const badges = [];
                     if (!el.skipped && el.click_verified === false) {
-                        badges.push('<span class="badge" title="The click could not be confirmed on this exact element — treat its events with caution" style="background:rgba(251,146,60,0.12);color:#fdba74;border:1px solid rgba(251,146,60,0.35);font-size:0.55rem">unverified</span>');
+                        badges.push('<span class="badge" title="The click could not be confirmed on this exact element — treat its events with caution" style="background:var(--t-orange);color:var(--c-orange);border:1px solid var(--e-orange);font-size:0.55rem">unverified</span>');
                     }
                     if (el.element.is_download) {
-                        badges.push('<span class="badge" title="Download link" style="background:rgba(56,189,248,0.12);color:#7dd3fc;border:1px solid rgba(56,189,248,0.35);font-size:0.55rem">download</span>');
+                        badges.push('<span class="badge" title="Download link" style="background:rgba(56,189,248,0.12);color:var(--c-info-2);border:1px solid rgba(56,189,248,0.35);font-size:0.55rem">download</span>');
                     }
                     if (el.blocked_by) {
-                        badges.push(`<span class="badge" title="Covered by ${escapeHtml(el.blocked_by)} — the audit clicked through it" style="background:rgba(148,163,184,0.12);color:#cbd5e1;border:1px solid rgba(148,163,184,0.35);font-size:0.55rem">overlaid</span>`);
+                        badges.push(`<span class="badge" title="Covered by ${escapeHtml(el.blocked_by)} — the audit clicked through it" style="background:rgba(148,163,184,0.12);color:var(--text-2);border:1px solid rgba(148,163,184,0.35);font-size:0.55rem">overlaid</span>`);
                     }
                     const badgeHtml = badges.length ? '<div style="margin-top:3px">' + badges.join(' ') + '</div>' : '';
                     const netReqs = el.network_requests || [];
@@ -598,9 +598,9 @@ function renderTable() {
                     const netCell = netCount
                         ? `<span class="badge b-count" style="cursor:pointer" onclick="event.stopPropagation();document.getElementById('${netId}').classList.toggle('hidden')">${netCount} req ▾</span>` +
                           `<div id="${netId}" class="hidden" style="max-height:220px;overflow:auto;margin-top:6px;text-align:left">` +
-                          netReqs.map(nr => `<div class="mono" style="font-size:0.62rem;word-break:break-all;color:#94a3b8;margin-bottom:3px">${escUrl(nr.url)}</div>`).join('') +
+                          netReqs.map(nr => `<div class="mono" style="font-size:0.62rem;word-break:break-all;color:var(--muted);margin-bottom:3px">${escUrl(nr.url)}</div>`).join('') +
                           `</div>`
-                        : (el.skipped ? '<span style="color:#64748b">skipped</span>' : '<span style="color:#64748b">0</span>');
+                        : (el.skipped ? '<span style="color:var(--muted)">skipped</span>' : '<span style="color:var(--muted)">0</span>');
                     html += `<tr>
                         <td>${j + 1}</td>
                         <td title="${el.element.selector}">${trackIcon} <span class="mono">${elLabel}</span>${badgeHtml}</td>
@@ -633,7 +633,7 @@ function renderTable() {
             const comp = `<td style="text-align:center" rowspan="${span}">${B(r.Compliance)}</td>`;
             if (!px.length) {
                 html += `<tr><td>${i + 1}</td><td class="url-col" title="${r.URL}">${r.URL}</td>` +
-                    `<td colspan="4" style="color:#64748b">No marketing pixels fired in “${currentScenario}”</td>${comp}</tr>`;
+                    `<td colspan="4" style="color:var(--muted)">No marketing pixels fired in “${currentScenario}”</td>${comp}</tr>`;
                 return;
             }
             px.forEach((p, j) => {
@@ -641,7 +641,7 @@ function renderTable() {
                     ${j === 0 ? `<td rowspan="${span}">${i + 1}</td>
                       <td rowspan="${span}" class="url-col" title="${r.URL}">${r.URL}</td>` : ''}
                     <td><b>${p.name}</b></td>
-                    <td>${p.id ? '<span class="mono">' + p.id + '</span>' : '<span style="color:#475569">--</span>'}</td>
+                    <td>${p.id ? '<span class="mono">' + p.id + '</span>' : '<span style="color:var(--text-2)">--</span>'}</td>
                     <td style="text-align:center"><span class="badge b-count">${p.count}</span></td>
                     <td>${srcChip(p.source)}</td>
                     ${j === 0 ? comp : ''}</tr>`;
@@ -691,11 +691,11 @@ async function loadSchedules() {
         <tr>
             <td class="mono">${s.id.substring(0,8)}</td>
             <td>${s.filename}</td>
-            <td><span class="badge b-pass" style="background:rgba(139,92,246,0.1);color:#a78bfa;border-color:rgba(139,92,246,0.3);">${s.frequency}</span></td>
-            <td>${s.email ? s.email : '<span style="color:#64748b">—</span>'}</td>
+            <td><span class="badge b-pass" style="background:rgba(139,92,246,0.1);color:var(--c-purple);border-color:rgba(139,92,246,0.3);">${s.frequency}</span></td>
+            <td>${s.email ? s.email : '<span style="color:var(--muted)">—</span>'}</td>
             <td>${new Date(s.createdAt).toLocaleString()}</td>
             <td>${s.lastRun ? new Date(s.lastRun).toLocaleString() : 'Never'}</td>
-            <td style="white-space:normal;max-width:220px;font-size:0.7rem;color:#94a3b8">${s.lastStatus || '—'}</td>
+            <td style="white-space:normal;max-width:220px;font-size:0.7rem;color:var(--muted)">${s.lastStatus || '—'}</td>
             <td><button class="btn btn-danger" onclick="cancelSchedule('${s.id}')">Cancel</button></td>
         </tr>
     `).join('');
@@ -906,7 +906,7 @@ async function loadDcCrawledUrls() {
         return;
     }
     body.innerHTML = urls.map((u, i) =>
-        `<tr><td>${i + 1}</td><td class="url-col" title="${escapeHtml(u)}"><a href="${escapeHtml(u)}" style="color:#a78bfa; text-decoration:none;">${escapeHtml(u)}</a></td></tr>`
+        `<tr><td>${i + 1}</td><td class="url-col" title="${escapeHtml(u)}"><a href="${escapeHtml(u)}" style="color:var(--c-purple); text-decoration:none;">${escapeHtml(u)}</a></td></tr>`
     ).join('');
     document.getElementById('downloadUrlsBtn').classList.remove('hidden');
     document.getElementById('validateDiscoveredBtn').classList.remove('hidden');
@@ -948,7 +948,7 @@ function renderDcTable() {
                 <th>#</th><th>URL</th>
                 <th style="text-align:center">Elements</th>
                 <th class="h-teal" style="text-align:center">With Tracking</th>
-                <th style="text-align:center; color:#f87171">No Tracking</th>
+                <th style="text-align:center; color:var(--c-bad)">No Tracking</th>
                 <th>Details</th>
             </tr>`;
     } else if (dcMode === 'pixels') {
@@ -977,13 +977,13 @@ function renderDcTable() {
             <tr>
                 <th rowspan="2">#</th><th rowspan="2">URL</th>
                 <th colspan="2" class="h-adobe" style="text-align:center; background:rgba(255,255,255,0.05)">GTM</th>
-                <th colspan="3" class="h-adobe" style="text-align:center; background: rgba(59, 130, 246, 0.15); color: #60a5fa;">GA4</th>
+                <th colspan="3" class="h-adobe" style="text-align:center; background: var(--t-info); color: var(--c-info);">GA4</th>
             </tr>
             <tr>
-                <th style="background:rgba(255,255,255,0.03)">Loaded</th><th style="background:rgba(255,255,255,0.03)">GTM ID</th>
-                <th class="h-adobe" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa;">Fired</th>
-                <th class="h-adobe" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa;">Measurement ID</th>
-                <th class="h-adobe" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa;">Page View</th>
+                <th style="background:var(--surface-3)">Loaded</th><th style="background:var(--surface-3)">GTM ID</th>
+                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Fired</th>
+                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Measurement ID</th>
+                <th class="h-adobe" style="background: var(--t-info); color: var(--c-info);">Page View</th>
             </tr>`;
     }
 
@@ -1009,22 +1009,22 @@ function renderDcTable() {
         const tracked = dcCachedResults.reduce((a, r) => a + (Number(r.With_Tracking) || 0), 0);
         const untracked = dcCachedResults.reduce((a, r) => a + (Number(r.Without_Tracking) || 0), 0);
         statsBar.innerHTML = `
-            <div class="stat"><div class="stat-dot" style="background:#60a5fa;color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${totalEl}</div><div class="stat-lbl">Total Elements Clicked</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:var(--c-info);color:var(--c-info);"></div><div><div class="stat-val" style="color:var(--c-info-2);">${totalEl}</div><div class="stat-lbl">Total Elements Clicked</div></div></div>
             <div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${tracked}</div><div class="stat-lbl">With Analytics Tracking</div></div></div>
-            <div class="stat"><div class="stat-dot" style="background:#ef4444;color:#ef4444;"></div><div><div class="stat-val" style="color:#f87171;">${untracked}</div><div class="stat-lbl">No Tracking Detected</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:var(--c-bad);color:var(--c-bad);"></div><div><div class="stat-val" style="color:var(--c-bad);">${untracked}</div><div class="stat-lbl">No Tracking Detected</div></div></div>
         `;
     } else if (dcMode === 'pixels') {
         const fires = dcCachedResults.reduce((a, r) => a + (Number(r[currentScenario + '_Count']) || 0), 0);
         statsBar.innerHTML = `
-            <div class="stat"><div class="stat-dot" style="background:#60a5fa;color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${fires}</div><div class="stat-lbl">Pixel Fires · ${currentScenario}</div></div></div>
+            <div class="stat"><div class="stat-dot" style="background:var(--c-info);color:var(--c-info);"></div><div><div class="stat-val" style="color:var(--c-info-2);">${fires}</div><div class="stat-lbl">Pixel Fires · ${currentScenario}</div></div></div>
             <div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${st.compliant}/${dcCachedResults.length}</div><div class="stat-lbl">Compliant</div></div></div>
-            <div class="stat"><div class="stat-dot" style="background:#ef4444;color:#ef4444;"></div><div><div class="stat-val" style="color:#f87171;">${st.violations}/${dcCachedResults.length}</div><div class="stat-lbl">Violations</div></div></div>`;
+            <div class="stat"><div class="stat-dot" style="background:var(--c-bad);color:var(--c-bad);"></div><div><div class="stat-val" style="color:var(--c-bad);">${st.violations}/${dcCachedResults.length}</div><div class="stat-lbl">Violations</div></div></div>`;
     } else if (dcMode === 'tealium') {
         statsBar.innerHTML = `<div class="stat"><div class="stat-dot dot-teal"></div><div><div class="stat-val val-teal">${st.teal}/${dcCachedResults.length}</div><div class="stat-lbl">Tealium Detected</div></div></div>`;
     } else {
         statsBar.innerHTML = `
             <div class="stat"><div class="stat-dot dot-adobe"></div><div><div class="stat-val val-adobe">${st.adobe}/${dcCachedResults.length}</div><div class="stat-lbl">Adobe Detected</div></div></div>
-            <div class="stat"><div class="stat-dot" style="background:#60a5fa; color:#60a5fa;"></div><div><div class="stat-val" style="color:#93c5fd;">${st.ga4}/${dcCachedResults.length}</div><div class="stat-lbl">GA4 Detected</div></div></div>`;
+            <div class="stat"><div class="stat-dot" style="background:var(--c-info); color:var(--c-info);"></div><div><div class="stat-val" style="color:var(--c-info-2);">${st.ga4}/${dcCachedResults.length}</div><div class="stat-lbl">GA4 Detected</div></div></div>`;
     }
 
     if (dcMode === 'clicks') {
@@ -1040,7 +1040,7 @@ function renderDcTable() {
                 <td class="url-col" title="${r.URL}">${r.URL}</td>
                 <td style="text-align:center"><span class="badge b-count">${r.Total_Elements || 0}</span></td>
                 <td style="text-align:center"><span class="badge b-pass">${r.With_Tracking || 0}</span></td>
-                <td style="text-align:center">${(r.Without_Tracking || 0) > 0 ? '<span class="badge b-fail">' + r.Without_Tracking + '</span>' : '<span style="color:#64748b">0</span>'}</td>
+                <td style="text-align:center">${(r.Without_Tracking || 0) > 0 ? '<span class="badge b-fail">' + r.Without_Tracking + '</span>' : '<span style="color:var(--muted)">0</span>'}</td>
                 <td><span style="font-size:0.7rem;color:var(--accent);cursor:pointer">▶ Expand</span></td>
             </tr>`;
             html += `<tr id="${detailId}" class="hidden"><td colspan="6" style="padding:0;background:var(--inset-bg)">`;
@@ -1057,15 +1057,15 @@ function renderDcTable() {
                     let ga4_3 = formatSingleGa4Event(el.ga4_events[2]);
                     if (el.ga4_events.length > 3) {
                         for (let k = 3; k < el.ga4_events.length; k++) {
-                            ga4_3 += '<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">' + formatSingleGa4Event(el.ga4_events[k]);
+                            ga4_3 += '<hr style="border-color:var(--border);margin:8px 0">' + formatSingleGa4Event(el.ga4_events[k]);
                         }
                     }
                         
                     const aaHtml = el.adobe_calls.length
                         ? el.adobe_calls.map(c => {
                             const displayName = c.link_name || c.events || c.link_type || 'adobe_call';
-                            const rsid = c.report_suite ? '<span class="badge" style="background:rgba(251,146,60,0.12);color:#fdba74;border:1px solid rgba(251,146,60,0.35);margin-bottom:4px;display:inline-block;font-family:monospace;font-size:0.6rem;">' + c.report_suite + '</span><br>' : '';
-                            let s = '<div style="margin-bottom:6px;">' + rsid + '<b style="color:#fdba74">' + displayName + '</b> <span style="color:#94a3b8;font-size:0.7rem">(' + c.link_type + ')</span>';
+                            const rsid = c.report_suite ? '<span class="badge" style="background:var(--t-orange);color:var(--c-orange);border:1px solid var(--e-orange);margin-bottom:4px;display:inline-block;font-family:monospace;font-size:0.6rem;">' + c.report_suite + '</span><br>' : '';
+                            let s = '<div style="margin-bottom:6px;">' + rsid + '<b style="color:var(--c-orange)">' + displayName + '</b> <span style="color:var(--muted);font-size:0.7rem">(' + c.link_type + ')</span>';
                             
                             const items = [];
                             if (c.events) items.push({ k: 'events', v: c.events });
@@ -1074,26 +1074,26 @@ function renderDcTable() {
                             
                             if (items.length) {
                                 s += `<div class="event-params">` + 
-                                     items.map(item => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:#94a3b8">${item.k}</span>: <span style="color:#fb923c">${item.v}</span></div>`).join('') + 
+                                     items.map(item => `<div style="margin-bottom:2px; word-break:break-all;"><span style="color:var(--muted)">${item.k}</span>: <span style="color:var(--c-orange)">${item.v}</span></div>`).join('') + 
                                      `</div>`;
                             }
                             s += '</div>';
                             return s;
-                        }).join('<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">')
+                        }).join('<hr style="border-color:var(--border);margin:8px 0">')
                         : (el.adobe_websdk && el.adobe_websdk.length
-                            ? el.adobe_websdk.map(w => '<b style="color:#fdba74">' + w.event_type + '</b>').join('<br>')
+                            ? el.adobe_websdk.map(w => '<b style="color:var(--c-orange)">' + w.event_type + '</b>').join('<br>')
                             : '');
 
                     const otherHtml = el.other_analytics && el.other_analytics.length
-                        ? el.other_analytics.map(o => `<div style="margin-bottom:4px;"><span class="badge" style="background:rgba(168,85,247,0.12);color:#c4b5fd;border:1px solid rgba(168,85,247,0.35);">${o.vendor}</span></div>`).join('')
+                        ? el.other_analytics.map(o => `<div style="margin-bottom:4px;"><span class="badge" style="background:var(--t-purple);color:var(--c-purple);border:1px solid var(--e-purple);">${o.vendor}</span></div>`).join('')
                         : '';
                     
                     let combinedAdobeOther = aaHtml;
                     if (otherHtml) {
-                        if (combinedAdobeOther) combinedAdobeOther += '<hr style="border-color:rgba(255,255,255,0.08);margin:8px 0">';
+                        if (combinedAdobeOther) combinedAdobeOther += '<hr style="border-color:var(--border);margin:8px 0">';
                         combinedAdobeOther += otherHtml;
                     }
-                    if (!combinedAdobeOther) combinedAdobeOther = '<span style="color:#64748b">--</span>';
+                    if (!combinedAdobeOther) combinedAdobeOther = '<span style="color:var(--muted)">--</span>';
 
                     const elLabel = el.element.id ? '#' + el.element.id : el.element.selector.substring(0, 40);
                     const trackIcon = el.skipped ? '⏭️' : (el.has_tracking ? '✅' : '⚠️');
@@ -1102,13 +1102,13 @@ function renderDcTable() {
                     // click actually reached the intended element.
                     const badges = [];
                     if (!el.skipped && el.click_verified === false) {
-                        badges.push('<span class="badge" title="The click could not be confirmed on this exact element — treat its events with caution" style="background:rgba(251,146,60,0.12);color:#fdba74;border:1px solid rgba(251,146,60,0.35);font-size:0.55rem">unverified</span>');
+                        badges.push('<span class="badge" title="The click could not be confirmed on this exact element — treat its events with caution" style="background:var(--t-orange);color:var(--c-orange);border:1px solid var(--e-orange);font-size:0.55rem">unverified</span>');
                     }
                     if (el.element.is_download) {
-                        badges.push('<span class="badge" title="Download link" style="background:rgba(56,189,248,0.12);color:#7dd3fc;border:1px solid rgba(56,189,248,0.35);font-size:0.55rem">download</span>');
+                        badges.push('<span class="badge" title="Download link" style="background:rgba(56,189,248,0.12);color:var(--c-info-2);border:1px solid rgba(56,189,248,0.35);font-size:0.55rem">download</span>');
                     }
                     if (el.blocked_by) {
-                        badges.push(`<span class="badge" title="Covered by ${escapeHtml(el.blocked_by)} — the audit clicked through it" style="background:rgba(148,163,184,0.12);color:#cbd5e1;border:1px solid rgba(148,163,184,0.35);font-size:0.55rem">overlaid</span>`);
+                        badges.push(`<span class="badge" title="Covered by ${escapeHtml(el.blocked_by)} — the audit clicked through it" style="background:rgba(148,163,184,0.12);color:var(--text-2);border:1px solid rgba(148,163,184,0.35);font-size:0.55rem">overlaid</span>`);
                     }
                     const badgeHtml = badges.length ? '<div style="margin-top:3px">' + badges.join(' ') + '</div>' : '';
                     const netReqs = el.network_requests || [];
@@ -1118,9 +1118,9 @@ function renderDcTable() {
                     const netCell = netCount
                         ? `<span class="badge b-count" style="cursor:pointer" onclick="event.stopPropagation();document.getElementById('${netId}').classList.toggle('hidden')">${netCount} req ▾</span>` +
                           `<div id="${netId}" class="hidden" style="max-height:220px;overflow:auto;margin-top:6px;text-align:left">` +
-                          netReqs.map(nr => `<div class="mono" style="font-size:0.62rem;word-break:break-all;color:#94a3b8;margin-bottom:3px">${escUrl(nr.url)}</div>`).join('') +
+                          netReqs.map(nr => `<div class="mono" style="font-size:0.62rem;word-break:break-all;color:var(--muted);margin-bottom:3px">${escUrl(nr.url)}</div>`).join('') +
                           `</div>`
-                        : (el.skipped ? '<span style="color:#64748b">skipped</span>' : '<span style="color:#64748b">0</span>');
+                        : (el.skipped ? '<span style="color:var(--muted)">skipped</span>' : '<span style="color:var(--muted)">0</span>');
                     html += `<tr>
                         <td>${j + 1}</td>
                         <td title="${el.element.selector}">${trackIcon} <span class="mono">${elLabel}</span>${badgeHtml}</td>
@@ -1153,7 +1153,7 @@ function renderDcTable() {
             const comp = `<td style="text-align:center" rowspan="${span}">${B(r.Compliance)}</td>`;
             if (!px.length) {
                 html += `<tr><td>${i + 1}</td><td class="url-col" title="${r.URL}">${r.URL}</td>` +
-                    `<td colspan="4" style="color:#64748b">No marketing pixels fired in “${currentScenario}”</td>${comp}</tr>`;
+                    `<td colspan="4" style="color:var(--muted)">No marketing pixels fired in “${currentScenario}”</td>${comp}</tr>`;
                 return;
             }
             px.forEach((p, j) => {
@@ -1161,7 +1161,7 @@ function renderDcTable() {
                     ${j === 0 ? `<td rowspan="${span}">${i + 1}</td>
                       <td rowspan="${span}" class="url-col" title="${r.URL}">${r.URL}</td>` : ''}
                     <td><b>${p.name}</b></td>
-                    <td>${p.id ? '<span class="mono">' + p.id + '</span>' : '<span style="color:#475569">--</span>'}</td>
+                    <td>${p.id ? '<span class="mono">' + p.id + '</span>' : '<span style="color:var(--text-2)">--</span>'}</td>
                     <td style="text-align:center"><span class="badge b-count">${p.count}</span></td>
                     <td>${srcChip(p.source)}</td>
                     ${j === 0 ? comp : ''}</tr>`;
@@ -1477,7 +1477,7 @@ function sdrOnSheetChange() {
     if (info) {
         let html = meta.testable_rows + ' testable rows across ' + real.length + ' real page URL(s)';
         if (urls.length > real.length) {
-            html += ' <span style="color:#fbbf24">· ' + (urls.length - real.length) +
+            html += ' <span style="color:var(--c-warn)">· ' + (urls.length - real.length) +
                     ' placeholder URL(s) will be marked "Not Tested"</span>';
         }
         if (real.length) {
@@ -1595,7 +1595,7 @@ async function sdrDetectGa4() {
         if (!ids.length) {
             sel.innerHTML = '<option value="">No GA4 property detected</option>';
             sel.disabled = true;
-            info.innerHTML = '<span style="color:#fbbf24">No GA4 hits seen on that page.</span> ' +
+            info.innerHTML = '<span style="color:var(--c-warn)">No GA4 hits seen on that page.</span> ' +
                 (d.error ? escapeHtml(String(d.error).slice(0, 120))
                          : 'Check the URL, or consent may be blocking tags.');
         } else {
@@ -1714,9 +1714,9 @@ async function sdrLoadResults() {
     const sum = sdrEl('sdrSummary');
     sum.classList.remove('hidden');
     const progressTile = (d.partial && d.total_cases && d.completed < d.total_cases)
-        ? tile('In progress', d.completed + '/' + d.total_cases, '#fbbf24') : '';
-    sum.innerHTML = progressTile + tile('Pass', pass, '#4ade80') + tile('Fail', fail, '#f87171') +
-        tile('Not tested', skip, '#fbbf24') + tile('Total', rows.length, 'var(--text)') +
+        ? tile('In progress', d.completed + '/' + d.total_cases, 'var(--c-warn)') : '';
+    sum.innerHTML = progressTile + tile('Pass', pass, 'var(--c-ok)') + tile('Fail', fail, 'var(--c-bad)') +
+        tile('Not tested', skip, 'var(--c-warn)') + tile('Total', rows.length, 'var(--text)') +
         (d.ga4_id ? tile('GA4 property',
             '<span style="font-size:0.85rem;font-family:monospace">' + escapeHtml(d.ga4_id) + '</span>',
             'var(--accent)') : '');
@@ -1730,7 +1730,7 @@ async function sdrLoadResults() {
             '<div style="font-size:0.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Failure patterns</div>' +
             pats.slice(0, 5).map(p =>
                 '<div style="font-size:0.74rem;margin-bottom:4px">' +
-                '<span class="mono" style="color:#fca5a5">' + escapeHtml(p.param) + '</span>' +
+                '<span class="mono" style="color:var(--c-bad)">' + escapeHtml(p.param) + '</span>' +
                 ' <span style="color:var(--muted)">' + p.failed_rows + ' row(s)</span>' +
                 (p.note ? '<br><span style="font-size:0.68rem;color:var(--muted);opacity:.85">' +
                           escapeHtml(p.note) + '</span>' : '') +
@@ -1740,11 +1740,11 @@ async function sdrLoadResults() {
 
     const badge = (s) => {
         const map = {
-            PASS: ['#4ade80', 'rgba(74,222,128,.12)', 'Pass'],
-            FAIL: ['#f87171', 'rgba(248,113,113,.12)', 'Fail'],
-            SKIPPED: ['#fbbf24', 'rgba(251,191,36,.12)', 'Not tested']
+            PASS: ['var(--c-ok)', 'var(--t-ok)', 'Pass'],
+            FAIL: ['var(--c-bad)', 'var(--t-bad)', 'Fail'],
+            SKIPPED: ['var(--c-warn)', 'var(--t-warn)', 'Not tested']
         };
-        const m = map[s] || ['#94a3b8', 'rgba(148,163,184,.12)', s];
+        const m = map[s] || ['var(--muted)', 'rgba(148,163,184,.12)', s];
         return '<span class="badge" style="color:' + m[0] + ';background:' + m[1] +
                ';border:1px solid ' + m[0] + '55">' + m[2] + '</span>';
     };
@@ -1752,14 +1752,14 @@ async function sdrLoadResults() {
     sdrEl('sdrResultsCard').classList.remove('hidden');
     sdrEl('sdrBody').innerHTML = rows.map(r => {
         const shortPage = String(r.page_url || '').replace(/^https?:\/\/(www\.)?/, '');
-        const reasonColor = r.status === 'FAIL' ? '#fca5a5' : 'var(--muted)';
+        const reasonColor = r.status === 'FAIL' ? 'var(--c-bad)' : 'var(--muted)';
         return '<tr>' +
             '<td>' + r.excel_row + '</td>' +
             '<td class="url-col" title="' + escapeHtml(r.page_url || '') +
                 '" style="max-width:170px;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(shortPage) + '</td>' +
             '<td style="max-width:180px">' + escapeHtml(r.button_name || '') + '</td>' +
-            '<td><span class="mono" style="color:#38bdf8">' + escapeHtml(r.expected_event || '') + '</span></td>' +
-            '<td><span class="mono" style="color:' + (r.actual_event ? '#4ade80' : '#64748b') + '">' +
+            '<td><span class="mono" style="color:var(--c-info)">' + escapeHtml(r.expected_event || '') + '</span></td>' +
+            '<td><span class="mono" style="color:' + (r.actual_event ? 'var(--c-ok)' : 'var(--muted)') + '">' +
                 escapeHtml(r.actual_event || '--') + '</span></td>' +
             '<td style="text-align:center">' + badge(r.status) + '</td>' +
             '<td style="white-space:normal;max-width:340px;font-size:0.72rem;color:' + reasonColor + '">' +
