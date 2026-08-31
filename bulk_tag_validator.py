@@ -3596,6 +3596,87 @@ async def _sdr_render_param_panels(browser, results, out_dir):
     return made
 
 
+# A staging site guards itself one of two ways, and which one it is cannot be
+# told from the URL. Basic auth is answered by the browser before any page
+# exists; a login form only appears once a page has loaded. Both are handled,
+# and the credentials are read from the environment rather than the command
+# line so they never appear in a process listing.
+def _auth_from_env():
+    u = os.environ.get("TV_AUTH_USER", "").strip()
+    p = os.environ.get("TV_AUTH_PASS", "")
+    return (u, p) if (u or p) else ("", "")
+
+
+LOGIN_FORM_JS = r"""
+() => {
+    // A visible password box is the one reliable sign of a login form.
+    const pw = [...document.querySelectorAll('input[type="password"]')]
+        .find(n => {
+            const r = n.getBoundingClientRect();
+            const cs = getComputedStyle(n);
+            return r.width > 20 && r.height > 8
+                && cs.visibility !== 'hidden' && cs.display !== 'none';
+        });
+    if (!pw) return null;
+
+    const form = pw.closest('form');
+    const scope = form || document;
+    // The user box is the text-ish input just before the password one.
+    const candidates = [...scope.querySelectorAll(
+        'input[type="text"], input[type="email"], input:not([type])')]
+        .filter(n => {
+            const r = n.getBoundingClientRect();
+            return r.width > 20 && r.height > 8;
+        });
+    let user = null;
+    for (const n of candidates) {
+        if (pw.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_PRECEDING) user = n;
+    }
+    if (!user && candidates.length) user = candidates[0];
+
+    const mark = (n, name) => { if (n) n.setAttribute('data-tv-login', name); };
+    mark(pw, 'pass');
+    mark(user, 'user');
+    const submit = scope.querySelector(
+        'button[type="submit"], input[type="submit"], button:not([type])');
+    mark(submit, 'submit');
+    return {user: !!user, submit: !!submit, inForm: !!form};
+}
+"""
+
+
+async def _sdr_try_login(page, user, pw):
+    """Fill and submit a login form if the page is showing one.
+
+    Returns True when a form was submitted, so the caller can say so once
+    rather than guessing from the page that follows.
+    """
+    if not (user or pw):
+        return False
+    try:
+        found = await page.evaluate(LOGIN_FORM_JS)
+    except Exception:
+        return False
+    if not found:
+        return False
+    try:
+        if found.get("user"):
+            await page.fill('[data-tv-login="user"]', user)
+        await page.fill('[data-tv-login="pass"]', pw)
+        if found.get("submit"):
+            await page.click('[data-tv-login="submit"]')
+        else:
+            await page.press('[data-tv-login="pass"]', "Enter")
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=20000)
+        except Exception:
+            pass
+        await asyncio.sleep(2.0)
+        return True
+    except Exception:
+        return False
+
+
 def _sdr_clean(v):
     """Normalise one SDR cell. The template uses '-' for 'not applicable'."""
     if v is None:
@@ -4431,11 +4512,19 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         results.append(row)
         return row
 
-    context = await browser.new_context(
-        viewport={'width': 1280, 'height': 800},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-    )
+    auth_user, auth_pass = _auth_from_env()
+    ctx_args = {
+        "viewport": {'width': 1280, 'height': 800},
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    }
+    if auth_user or auth_pass:
+        # Answers the server's own challenge, before any page is rendered.
+        ctx_args["http_credentials"] = {"username": auth_user, "password": auth_pass}
+        sys.stdout.write("[SDR] Credentials supplied for %r — will answer Basic auth "
+                         "and fill a login form if one appears" % auth_user + os.linesep)
+        sys.stdout.flush()
+    context = await browser.new_context(**ctx_args)
 
     all_requests = []
     seen_req_keys = set()
@@ -4507,6 +4596,11 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             for c in page_cases:
                 _record(c, "FAIL", f"Page did not load: {str(e)[:90]}")
             continue
+
+        if await _sdr_try_login(page, auth_user, auth_pass):
+            sys.stdout.write("[SDR] Signed in through the login form on the page"
+                             + os.linesep)
+            sys.stdout.flush()
 
         await asyncio.sleep(3)
         await accept_cookies(page)
@@ -4671,6 +4765,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             """
             try:
                 await page.goto(page_url, wait_until="domcontentloaded", timeout=45000)
+                await _sdr_try_login(page, auth_user, auth_pass)
                 await asyncio.sleep(2.0)
                 try:
                     await page.wait_for_load_state("networkidle", timeout=12000)

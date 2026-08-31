@@ -1492,7 +1492,9 @@ async function sdrRun(resume) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sheet: sheet, ga4Id: ga4Id, qaColumn: qaColumn,
-                                   startUrl: startUrl, resume: !!resume })
+                                   startUrl: startUrl, resume: !!resume,
+                                   authUser: (sdrEl('sdrAuthUser') || {}).value || '',
+                                   authPass: (sdrEl('sdrAuthPass') || {}).value || '' })
         });
         const d = await r.json();
         if (!r.ok || d.error) {

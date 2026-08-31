@@ -1132,6 +1132,23 @@
                     </select>
                 </div>
 
+                <!-- Step 5: sign-in, only when the site asks for one -->
+                <div style="margin-bottom:18px">
+                    <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:6px">
+                        <b style="color:var(--text)">5.</b> Sign-in for the site <span style="opacity:.75">(optional — staging behind a password)</span>
+                    </label>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap">
+                        <input type="text" id="sdrAuthUser" class="sch-email" autocomplete="off"
+                               placeholder="Username" style="flex:1;min-width:200px;max-width:255px">
+                        <input type="password" id="sdrAuthPass" class="sch-email" autocomplete="new-password"
+                               placeholder="Password" style="flex:1;min-width:200px;max-width:255px">
+                    </div>
+                    <div style="font-size:0.72rem;color:var(--muted);margin-top:6px">
+                        Covers both kinds of gate: the browser's own sign-in box, and a
+                        login form on the page. Used only for this run — never written to disk.
+                    </div>
+                </div>
+
                 <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
                     <button id="sdrRunBtn" class="btn btn-primary" disabled>Run SDR QA</button>
                     <button id="sdrResumeBtn" class="btn hidden" title="Continue where the last run stopped instead of re-testing every row"><svg class="ic"><use href="#i-play"/></svg>Resume previous run</button>

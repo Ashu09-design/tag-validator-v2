@@ -223,7 +223,7 @@ app.post('/api/sdr/detect-ga4', (req, res) => {
 app.post('/api/sdr/run', (req, res) => {
     if (validatorProcess) return res.status(400).json({ error: 'Running' });
     if (!fs.existsSync(SDR_PATH)) return res.status(400).json({ error: 'Upload an SDR file first' });
-    const { sheet, ga4Id, startUrl, qaColumn, resume } = req.body || {};
+    const { sheet, ga4Id, startUrl, qaColumn, resume, authUser, authPass } = req.body || {};
     if (!ga4Id) return res.status(400).json({ error: 'Select which GA4 measurement ID to validate against' });
 
     const args = ['-u', 'bulk_tag_validator.py', '--mode', 'sdr', '--sdr', SDR_PATH,
@@ -258,7 +258,20 @@ app.post('/api/sdr/run', (req, res) => {
     cancelRequested = false;
     validatorLogs = [`Starting SDR validation — sheet "${sheet || '(auto)'}" against ${ga4Id}...`];
     const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
-    validatorProcess = spawn(pyCmd, args, { cwd: __dirname });
+    // Credentials for a protected staging site travel in the environment, not
+    // in argv: anything on the command line is readable by every process on
+    // the machine. They are never written to disk either — a new run asks for
+    // them again.
+    const env = { ...process.env };
+    if (authUser || authPass) {
+        env.TV_AUTH_USER = authUser || '';
+        env.TV_AUTH_PASS = authPass || '';
+        validatorLogs.push(`Signing in as "${authUser || '(no user)'}" where the site asks.`);
+    } else {
+        delete env.TV_AUTH_USER;
+        delete env.TV_AUTH_PASS;
+    }
+    validatorProcess = spawn(pyCmd, args, { cwd: __dirname, env });
     const proc = validatorProcess;
     proc.stdout.on('data', d => validatorLogs.push(d.toString().trim()));
     proc.stderr.on('data', d => validatorLogs.push("ERROR: " + d.toString().trim()));
