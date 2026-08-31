@@ -5521,24 +5521,39 @@ def _embed_shot(ws, path, row, col, label, width=SHOT_W):
         return 0
 
 
-def _last_used_column(ws, header_row):
-    """The last column that actually holds something.
+def _pick_shot_columns(ws, header_row, count=2):
+    """Where the evidence columns can go: tight against the table, and empty.
 
-    `ws.max_column` counts a cell that carries only formatting, and these
-    sheets are routinely styled well past their content — one had borders out
-    to column X with nothing in them after O. Appending at max_column left the
-    evidence stranded nine empty columns from the table it belongs to.
+    Two things go wrong on real sheets, and they pull in opposite directions.
+    `ws.max_column` counts a cell carrying only formatting — one SDR is styled
+    out to column X with nothing in it after O — so appending there strands the
+    evidence nine columns from the table. But a sheet can also hold something
+    off to the right with no header over it, and starting right after the last
+    header would then write over it.
+
+    So: start immediately after the last header, and take the first run of
+    `count` columns that is empty from the header row down. Tight when there
+    is nothing in the way, and never destructive when there is.
     """
-    last = 0
+    last_hdr = 0
     for c in range(1, ws.max_column + 1):
         if str(ws.cell(header_row, c).value or "").strip():
-            last = c
-    for r in range(header_row, min(ws.max_row, 2000) + 1):
-        for c in range(ws.max_column, last, -1):
-            if str(ws.cell(r, c).value or "").strip():
-                last = c
-                break
-    return last
+            last_hdr = c
+    start = (last_hdr or ws.max_column) + 1
+    bottom = min(ws.max_row, 5000)
+
+    def empty(col):
+        for r in range(header_row, bottom + 1):
+            if str(ws.cell(r, col).value or "").strip():
+                return False
+        return True
+
+    limit = max(ws.max_column, start) + 40
+    while start < limit:
+        if all(empty(start + i) for i in range(count)):
+            return start
+        start += 1
+    return ws.max_column + 1
 
 
 def _add_shot_columns(ws, header_row, results, row_of=lambda r: r.get("excel_row")):
@@ -5553,7 +5568,7 @@ def _add_shot_columns(ws, header_row, results, row_of=lambda r: r.get("excel_row
 
     if not any(r.get("shot_params") or r.get("shot_click") for r in results):
         return
-    c_par = _last_used_column(ws, header_row) + 1
+    c_par = _pick_shot_columns(ws, header_row, 2)
     c_click = c_par + 1
     for col, name in ((c_par, SHOT_COLS[0]), (c_click, SHOT_COLS[1])):
         h = ws.cell(header_row, col)
