@@ -3355,6 +3355,30 @@ SDR_RING_JS = r"""
     el.setAttribute('data-tv-ring', '1');
     el.style.setProperty('outline', '3px solid #e11d48', 'important');
     el.style.setProperty('outline-offset', '2px', 'important');
+
+    // A sub-menu item, a tray link, an accordion row: most of what a page
+    // offers is folded away until something opens it, and a control with no
+    // box cannot be photographed. Unfold whatever is hiding it, just long
+    // enough for the picture, then put it all back.
+    if (!(rectOf(el).width > 2 && rectOf(el).height > 2)) {
+        let n = el, guard = 0;
+        while (n && n !== document.body && guard++ < 14) {
+            const cs = getComputedStyle(n);
+            const collapsed = (cs.overflow !== 'visible')
+                && (parseFloat(cs.maxHeight) === 0 || parseFloat(cs.height) === 0);
+            if (cs.display === 'none' || cs.visibility === 'hidden'
+                    || parseFloat(cs.opacity) === 0 || collapsed) {
+                n.setAttribute('data-tv-shown', n.getAttribute('style') || '__none__');
+                n.style.setProperty('display', 'block', 'important');
+                n.style.setProperty('visibility', 'visible', 'important');
+                n.style.setProperty('opacity', '1', 'important');
+                n.style.setProperty('max-height', 'none', 'important');
+                n.style.setProperty('height', 'auto', 'important');
+                n.style.setProperty('overflow', 'visible', 'important');
+            }
+            n = n.parentElement;
+        }
+    }
     try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
 
     // A tray or sticky bar the audit opened earlier can sit on top of the
@@ -3422,6 +3446,12 @@ SDR_UNRING_JS = r"""
         n.style.removeProperty('outline');
         n.style.removeProperty('outline-offset');
         n.removeAttribute('data-tv-ring');
+    });
+    document.querySelectorAll('[data-tv-shown]').forEach(n => {
+        const prev = n.getAttribute('data-tv-shown');
+        if (prev && prev !== '__none__') n.setAttribute('style', prev);
+        else n.removeAttribute('style');
+        n.removeAttribute('data-tv-shown');
     });
     document.querySelectorAll('[data-tv-hid]').forEach(n => {
         const prev = n.getAttribute('data-tv-hid');
@@ -3675,6 +3705,99 @@ async def _sdr_try_login(page, user, pw):
         return True
     except Exception:
         return False
+
+
+NOT_IN_SDR_SHEET = "Not in SDR"
+
+
+def _sweep_pick_event(evs, text, href):
+    """Which of these hits belongs to the control that was just clicked.
+
+    Taking the first hit in the window is wrong: pages run timers, and a
+    periodic ping lands inside every window. A click beacon, on the other
+    hand, carries the thing that was clicked — its label or its destination —
+    so the hit is chosen by what is in it.
+    """
+    t = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    h = str(href or "").strip().lower().rstrip("/")
+    best, best_score = None, 0
+    for ev in evs:
+        score = 0
+        for v in (ev.get("params") or {}).values():
+            lv = str(v).strip().lower()
+            if not lv:
+                continue
+            if t and len(t) > 2 and (t in lv or lv in t):
+                score += 3
+            if h and len(h) > 8 and (h in lv or lv.rstrip("/").endswith(h)):
+                score += 3
+        if re.search(r"click|download|nav|link|cta|button|outbound|exit",
+                     str(ev.get("event") or ""), re.I):
+            score += 1
+        if score > best_score:
+            best, best_score = ev, score
+    return best, best_score
+
+
+def _sweep_resolve(extras_for_page):
+    """Settle the verdicts for one page's sweep, once all of it is known.
+
+    An event that shows up in nearly every window is ambient — a timer, an
+    engagement ping — and cannot be what any particular button sent. That can
+    only be judged after the whole page has been swept, which is why the
+    verdict is decided here rather than at each click.
+    """
+    if not extras_for_page:
+        return
+    windows = len(extras_for_page)
+    seen = {}
+    for e in extras_for_page:
+        for name in {ev.get("event", "") for ev in e.get("_raw_events", [])}:
+            seen[name] = seen.get(name, 0) + 1
+    ambient = {n for n, c in seen.items() if windows >= 4 and c >= windows * 0.7}
+
+    for e in extras_for_page:
+        evs = e.pop("_raw_events", []) or []
+        own = [ev for ev in evs if ev.get("event") not in ambient]
+        pick, score = _sweep_pick_event(own or evs, e.get("button_name"),
+                                        e.get("link_url"))
+        note = ""
+        if pick is None or score == 0:
+            pick = None
+            if evs:
+                note = ("only page-level hits fired in this window (%s) — nothing "
+                        "that names this control" % ", ".join(sorted(
+                            {ev.get("event", "") for ev in evs})[:4]))
+            else:
+                note = "no GA4 event fired on this click"
+        elif score < 3:
+            note = ("matched on the event name only — no parameter names this "
+                    "control, so read it with care")
+        e["status"] = "TAGGED" if pick else "NOT TAGGED"
+        e["actual_event"] = (pick or {}).get("event", "")
+        e["actual_params"] = (pick or {}).get("params", {}) or {}
+        e["measurement_id"] = (pick or {}).get("measurement_id", "")
+        e["fired_events"] = sorted({ev.get("event", "") for ev in evs})
+        if not e.get("shot_click"):
+            note = ((note + "; ") if note else "") + (
+                "no screenshot — this control is not rendered on the page as "
+                "loaded (it appears only on hover or inside a menu)")
+        e["reason"] = note
+        if ambient:
+            e["ambient_events"] = sorted(ambient)
+
+
+def _sweep_key(el):
+    """Logical identity of a clickable, stable across re-scans.
+
+    Elements are re-stamped on every scan, so a uid taken during row 1 does
+    not name the same node by row 20. Text, destination and zone do.
+    """
+    return (
+        re.sub(r"\s+", " ", str(el.get("text") or "")).strip().lower(),
+        str(el.get("href") or "").strip().lower(),
+        str(el.get("zone") or ""),
+    )
 
 
 def _sdr_clean(v):
@@ -4471,6 +4594,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 "completed": len(ordered),
                 "total_cases": len(cases),
                 "results": ordered,
+                "not_in_sdr": list(extras),
             }
             tmp = progress_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -4483,7 +4607,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         try:
             if ordered:
                 write_sdr_verdicts(sdr_path, parsed, ordered, filled_path,
-                                   qa_column=qa_column)
+                                   qa_column=qa_column, extras=list(extras))
         except Exception:
             pass
 
@@ -4529,6 +4653,9 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
     all_requests = []
     seen_req_keys = set()
     current_cid = {"v": -1}
+    # Controls found on the page that no SDR row accounts for. The sheet says
+    # what was specified; this says what is actually there.
+    extras = []
 
     def _push_req(u, post, ts):
         if not u:
@@ -4809,6 +4936,10 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 return [b for b in (batch or []) if b.get("uid")]
             except Exception:
                 return []
+
+        # Everything the SDR rows on this page end up clicking, so the sweep
+        # afterwards can tell specified from unspecified.
+        tested_keys = set()
 
         for ci, case in enumerate(page_cases):
             label = (case.get("button_name") or case.get("link_text") or "")[:34]
@@ -5485,6 +5616,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             if len(attempts) > 1:
                 reasons.append(f"(tried {len(attempts)} candidate elements; reporting the closest fit)")
 
+            tested_keys.add(_sweep_key(best))
             _record(case, status, "; ".join(reasons), {
                 "actual_event": (matched or {}).get("event", ""),
                 "actual_params": (matched or {}).get("params", {}),
@@ -5532,13 +5664,208 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             except Exception:
                 pass
 
+        # ---- what the SDR never mentioned ----
+        # The SDR says what should be tagged. It cannot say what was left out
+        # of it, and a button that is on the page but not in the sheet is the
+        # gap a manual pass is looking for. So every remaining control is
+        # clicked too, and reported as tagged (with what it sent) or not.
+        try:
+            leftovers = [e for e in await _fresh_elements()
+                         if _sweep_key(e) not in tested_keys]
+        except Exception:
+            leftovers = []
+        if leftovers:
+            sys.stdout.write("[SDR] %d control(s) on this page are not in the SDR "
+                             "— checking each one" % len(leftovers) + os.linesep)
+            sys.stdout.flush()
+
+        seen_extra = set()
+        page_extras = []
+        for xi, el in enumerate(leftovers):
+            key = _sweep_key(el)
+            if key in seen_extra:
+                continue
+            seen_extra.add(key)
+            name = (el.get("text") or "")[:60]
+            row_id = "x%d" % (len(extras) + 1)
+            try:
+                # Fresh page per control. Clicking many things into one page
+                # state leaves the site re-rendered and its triggers detached,
+                # and the button then looks untagged when it is not.
+                try:
+                    await page.goto(page_url, wait_until="domcontentloaded", timeout=45000)
+                    await _sdr_try_login(page, auth_user, auth_pass)
+                    await asyncio.sleep(1.5)
+                    await page.evaluate(BLOCK_NAVIGATION_JS)
+                    await page.evaluate(INSTRUMENT_TRACKING_JS)
+                    await page.evaluate(EXPOSE_HIDDEN_JS)
+                    await asyncio.sleep(1.0)
+                except Exception:
+                    pass
+
+                # The page re-renders after every click, so the element is
+                # located again rather than trusted from the earlier scan.
+                current = next((e for e in await _fresh_elements()
+                                if _sweep_key(e) == key), None)
+                if not current:
+                    continue
+                uid = current.get("uid")
+                loc_el = page.locator('[data-tvuid="%s"]' % uid).first
+                shot = await _sdr_capture_click_shot(page, SDR_SHOT_DIR, row_id, 1, uid)
+
+                bookmark = len(all_requests)
+
+                async def _press():
+                    """One attempt at a real click on this control.
+
+                    A tag manager hangs its link triggers off trusted events,
+                    so a dispatched click runs GA4's own auto-events and none
+                    of the site's — which reads back as "not tagged" for a
+                    button that is tagged. The pointer path is tried first and
+                    the dispatch is only a fallback.
+                    """
+                    try:
+                        await page.evaluate(CLOSE_CONSENT_UI_JS)
+                    except Exception:
+                        pass
+                    try:
+                        await loc_el.evaluate(
+                            "e => e.scrollIntoView({block: 'center', inline: 'center'})")
+                        await asyncio.sleep(0.3)
+                    except Exception:
+                        pass
+                    hit = None
+                    try:
+                        hit = await loc_el.evaluate(PIERCE_OVERLAY_JS)
+                    except Exception:
+                        pass
+                    method = ""
+                    if hit and hit.get("ok"):
+                        try:
+                            for t in ("mouseMoved", "mousePressed", "mouseReleased"):
+                                a = {"type": t, "x": hit["x"], "y": hit["y"]}
+                                if t != "mouseMoved":
+                                    a.update({"button": "left", "clickCount": 1})
+                                await cdp.send("Input.dispatchMouseEvent", a)
+                                if t == "mousePressed":
+                                    await asyncio.sleep(0.05)
+                            method = "cdp-click"
+                        except Exception:
+                            pass
+                    if not method:
+                        try:
+                            await loc_el.evaluate("e => e.click()")
+                            method = "js-click"
+                        except Exception:
+                            pass
+                    try:
+                        await page.evaluate(RESTORE_OVERLAY_JS)
+                    except Exception:
+                        pass
+                    return method
+
+                click_method = await _press()
+                if not click_method:
+                    continue
+
+                # Same wait the rows get: hold the window open when something
+                # is on its way, close it quickly when nothing is.
+                await asyncio.sleep(1.0)
+                try:
+                    expect = bool(await page.evaluate(PEEK_TRACKING_JS))
+                except Exception:
+                    expect = False
+                started = time.time()
+                min_wait = SDR_MIN_BEACON_WAIT if expect else 0.8
+                deadline = started + (SDR_BEACON_MAX_WAIT if expect else CLICK_IDLE_WAIT)
+                last_n, last_change = len(all_requests), time.time()
+                quiet = 2.0 if expect else 0.8
+                while time.time() < deadline:
+                    await asyncio.sleep(0.25)
+                    if len(all_requests) != last_n:
+                        last_n, last_change = len(all_requests), time.time()
+                        continue
+                    if time.time() - started < min_wait:
+                        continue
+                    if time.time() - last_change >= quiet:
+                        break
+
+                def _collect():
+                    got = []
+                    for req in all_requests[bookmark:]:
+                        ul = req["url"].lower()
+                        if "/g/collect" in ul or (("google-analytics.com" in ul
+                                                   or "analytics.google.com" in ul)
+                                                  and "collect" in ul):
+                            for ev in parse_ga4_event(req["url"], req["post"]):
+                                if ev.get("event") and not _is_noise_event(ev["event"]):
+                                    got.append(ev)
+                                    if ev.get("measurement_id"):
+                                        detected_ids.add(ev["measurement_id"])
+                    if ga4_id and ga4_mode != "any":
+                        return [e for e in got if e.get("measurement_id") == ga4_id]
+                    return got
+
+                scoped_x = _collect()
+                # Nothing here names this control, and the click went through
+                # the dispatch fallback: that is the signature of a trigger
+                # that only listens to real pointer events. Worth one honest
+                # second try before calling the button untagged.
+                _, sc = _sweep_pick_event(scoped_x, name, current.get("href", ""))
+                if sc < 3 and click_method != "cdp-click":
+                    if await _press():
+                        await asyncio.sleep(1.0)
+                        started = time.time()
+                        while time.time() - started < SDR_MIN_BEACON_WAIT:
+                            await asyncio.sleep(0.3)
+                            _, sc2 = _sweep_pick_event(
+                                _collect(), name, current.get("href", ""))
+                            if sc2 >= 3:
+                                break
+                        scoped_x = _collect()
+
+                # The verdict waits until the whole page is swept, because
+                # telling a click's own hit from a timer's needs to know what
+                # fires in every window.
+                rec = {
+                    "excel_row": row_id,
+                    "page_url": page_url,
+                    "location": current.get("zone", "") or "",
+                    "button_name": name,
+                    "link_url": current.get("href", "") or "",
+                    "status": "NOT TAGGED",
+                    "actual_event": "", "actual_params": {}, "measurement_id": "",
+                    "fired_events": [], "param_diff": [], "reason": "",
+                    "shot_click": shot,
+                    "_raw_events": scoped_x,
+                }
+                extras.append(rec)
+                page_extras.append(rec)
+                sys.stdout.write("[SDR]   not-in-SDR [%d/%d] \"%s\" -> %d hit(s)%s"
+                                 % (xi + 1, len(leftovers), name[:34],
+                                    len(scoped_x), os.linesep))
+                sys.stdout.flush()
+            except Exception as e:
+                sys.stdout.write("[SDR]   not-in-SDR \"%s\" -> could not test (%s)%s"
+                                 % (name[:34], str(e)[:60], os.linesep))
+                sys.stdout.flush()
+
+        _sweep_resolve(page_extras)
+        if page_extras:
+            n_tag = sum(1 for e in page_extras if e["status"] == "TAGGED")
+            sys.stdout.write("[SDR] Not in SDR on this page: %d tagged, %d not tagged"
+                             % (n_tag, len(page_extras) - n_tag) + os.linesep)
+            sys.stdout.flush()
+
         # Page finished — checkpoint before moving to the next.
         _flush(partial=True)
 
     # Draw the read-out panels now that every row has its captured hit. Doing
     # it here, rather than during the audit, keeps the clicking at full speed.
     try:
-        n_panels = await _sdr_render_param_panels(browser, results, SDR_SHOT_DIR)
+        n_panels = await _sdr_render_param_panels(
+            browser, results + [e for e in extras if e.get("actual_event")],
+            SDR_SHOT_DIR)
         if n_panels:
             sys.stdout.write("[SDR] Rendered %d parameter panels" % n_panels + os.linesep)
             sys.stdout.flush()
@@ -5557,7 +5884,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
     if detected_ids:
         sys.stdout.write(f"[SDR] GA4 properties seen on site: {', '.join(sorted(detected_ids))}\n")
     sys.stdout.flush()
-    return {"meta": parsed, "results": results,
+    return {"meta": parsed, "results": results, "not_in_sdr": extras,
             "detected_ga4_ids": sorted(detected_ids), "ga4_id": ga4_id}
 
 
@@ -5690,7 +6017,74 @@ def _add_shot_columns(ws, header_row, results, row_of=lambda r: r.get("excel_row
 QA_DETAIL_SHEET = "Tool QA Details"
 
 
-def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
+def _write_not_in_sdr_sheet(wb, extras):
+    """One sheet listing the controls the SDR never mentioned.
+
+    A verdict sheet can only report on rows somebody wrote down. This is the
+    other half of coverage: what is on the page, whether it is tagged, and
+    what it sent — with a picture of the control either way.
+    """
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    if not extras:
+        return
+    if NOT_IN_SDR_SHEET in wb.sheetnames:
+        del wb[NOT_IN_SDR_SHEET]
+    ws = wb.create_sheet(NOT_IN_SDR_SHEET)
+
+    headers = ["Page URL", "Where", "Button / Link", "Link URL", "Tagged?",
+               "GA4 Event", "GA4 Property", "Parameters Sent", "Note"]
+    ws.append(headers)
+    for c in range(1, len(headers) + 1):
+        h = ws.cell(1, c)
+        h.font = Font(bold=True, color="FFFFFF")
+        h.fill = PatternFill("solid", fgColor="4472C4")
+        h.alignment = Alignment(vertical="center")
+    ws.freeze_panes = "A2"
+
+    fill_yes = PatternFill("solid", fgColor="C6EFCE")
+    fill_no = PatternFill("solid", fgColor="FFC7CE")
+    font_yes = Font(color="006100", bold=True)
+    font_no = Font(color="9C0006", bold=True)
+
+    ordered = sorted(extras, key=lambda e: (e.get("page_url", ""),
+                                            e.get("location", ""),
+                                            e.get("button_name", "")))
+    for e in ordered:
+        params = "; ".join("%s: %s" % (k, v)
+                           for k, v in (e.get("actual_params") or {}).items())
+        ws.append([
+            e.get("page_url", ""),
+            e.get("location", "") or "-",
+            e.get("button_name", "") or "(no label)",
+            e.get("link_url", "") or "-",
+            "Tagged" if e.get("status") == "TAGGED" else "Not tagged",
+            e.get("actual_event", "") or "-",
+            e.get("measurement_id", "") or "-",
+            params or "-",
+            e.get("reason", "") or "",
+        ])
+        row = ws.max_row
+        cell = ws.cell(row, 5)
+        if e.get("status") == "TAGGED":
+            cell.fill, cell.font = fill_yes, font_yes
+        else:
+            cell.fill, cell.font = fill_no, font_no
+
+    for i, w in enumerate([40, 12, 34, 40, 12, 22, 16, 60, 44], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    for r in ws.iter_rows(min_row=2, max_row=ws.max_row):
+        r[7].alignment = Alignment(wrap_text=True, vertical="top")
+        r[8].alignment = Alignment(wrap_text=True, vertical="top")
+
+    # Same two evidence columns as the SDR sheet: the control, and what it
+    # sent if it sent anything.
+    line_of = {id(e): i + 2 for i, e in enumerate(ordered)}
+    _add_shot_columns(ws, 1, ordered, row_of=lambda e: line_of.get(id(e)))
+
+
+def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column="", extras=None):
     """Write the verdicts back into a copy of the operator's own SDR.
 
     Two things have to be true at once, so the workbook carries both:
@@ -5828,6 +6222,8 @@ def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
         else:
             row[7].fill, row[7].font = fill_skip, font_skip
 
+    _write_not_in_sdr_sheet(wb, extras or [])
+
     wb.save(out_path)
     return out_path
 
@@ -5956,6 +6352,7 @@ async def main():
                        "sheet": meta.get("sheet", ""),
                        "ga4_id": sdr_out.get("ga4_id", ""),
                        "detected_ga4_ids": sdr_out.get("detected_ga4_ids", []),
+                       "not_in_sdr": sdr_out.get("not_in_sdr", []),
                        "failure_patterns": patterns,
                        "partial": False,
                        "completed": len(results),
@@ -6004,7 +6401,8 @@ async def main():
         #    marked Pass/Fail and the reason written in the column beside it.
         try:
             write_sdr_verdicts(sdr_path, meta, results, 'sdr_filled.xlsx',
-                               qa_column=(getattr(args, 'qa_column', '') or ''))
+                               qa_column=(getattr(args, 'qa_column', '') or ''),
+                               extras=sdr_out.get("not_in_sdr") or [])
             sys.stdout.write("[SDR] Wrote sdr_filled.xlsx (your SDR with QA + reason columns)\n")
         except Exception as e:
             sys.stdout.write(f"[SDR] [WARN] could not write filled SDR: {str(e)[:140]}\n")
