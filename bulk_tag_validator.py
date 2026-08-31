@@ -5521,6 +5521,26 @@ def _embed_shot(ws, path, row, col, label, width=SHOT_W):
         return 0
 
 
+def _last_used_column(ws, header_row):
+    """The last column that actually holds something.
+
+    `ws.max_column` counts a cell that carries only formatting, and these
+    sheets are routinely styled well past their content — one had borders out
+    to column X with nothing in them after O. Appending at max_column left the
+    evidence stranded nine empty columns from the table it belongs to.
+    """
+    last = 0
+    for c in range(1, ws.max_column + 1):
+        if str(ws.cell(header_row, c).value or "").strip():
+            last = c
+    for r in range(header_row, min(ws.max_row, 2000) + 1):
+        for c in range(ws.max_column, last, -1):
+            if str(ws.cell(r, c).value or "").strip():
+                last = c
+                break
+    return last
+
+
 def _add_shot_columns(ws, header_row, results, row_of=lambda r: r.get("excel_row")):
     """Add the two picture columns at the end and fill them.
 
@@ -5533,7 +5553,7 @@ def _add_shot_columns(ws, header_row, results, row_of=lambda r: r.get("excel_row
 
     if not any(r.get("shot_params") or r.get("shot_click") for r in results):
         return
-    c_par = ws.max_column + 1
+    c_par = _last_used_column(ws, header_row) + 1
     c_click = c_par + 1
     for col, name in ((c_par, SHOT_COLS[0]), (c_click, SHOT_COLS[1])):
         h = ws.cell(header_row, col)
