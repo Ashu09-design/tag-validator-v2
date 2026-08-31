@@ -37,3 +37,4 @@ click_results.json
 node-v*/
 ms-playwright/
 node.tar.xz
+sdr_shots/

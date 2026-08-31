@@ -3328,6 +3328,274 @@ SDR_SKIP_VALUES = {'', '-', '--', 'n/a', 'na', 'nan', 'none', 'tbd', 'x'}
 SDR_GLOBAL_URLS = {'all pages', 'global', 'all page', 'sitewide', 'site wide'}
 
 
+SDR_SHOT_DIR = "sdr_shots"
+
+# Ring the element the audit actually clicked, so the screenshot shows which
+# control the row was judged on rather than a page that could be anything.
+SDR_RING_JS = r"""
+(uid) => {
+    const el = document.querySelector('[data-tvuid="' + uid + '"]');
+    if (!el) return null;
+
+    // An element rendered by `display: contents` reports no box of its own;
+    // fall back to its first laid-out child so the crop still finds it.
+    const rectOf = (n) => {
+        let r = n.getBoundingClientRect();
+        if (r.width > 2 && r.height > 2) return r;
+        for (const c of n.getClientRects()) {
+            if (c.width > 2 && c.height > 2) return c;
+        }
+        for (const k of n.children) {
+            const kr = k.getBoundingClientRect();
+            if (kr.width > 2 && kr.height > 2) return kr;
+        }
+        return r;
+    };
+
+    el.setAttribute('data-tv-ring', '1');
+    el.style.setProperty('outline', '3px solid #e11d48', 'important');
+    el.style.setProperty('outline-offset', '2px', 'important');
+    try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+
+    // A tray or sticky bar the audit opened earlier can sit on top of the
+    // control. Pointer-events tricks do not help a photograph — the thing has
+    // to be out of the way — so anything painted over the target's centre is
+    // hidden for the length of the shot and put back afterwards.
+    const r = rectOf(el);
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    let hidden = 0;
+    const hide = (n) => {
+        n.setAttribute('data-tv-hid', n.style.visibility || '__none__');
+        n.style.setProperty('visibility', 'hidden', 'important');
+        hidden++;
+    };
+
+    // A tray the audit opened earlier — an ISI panel, a modal — can be pinned
+    // over the whole viewport. It is not necessarily what elementsFromPoint
+    // reports at the target's centre, so full-screen pinned layers are taken
+    // out by their own measurement: pinned, large, and not an ancestor of the
+    // control being photographed.
+    try {
+        const vw = window.innerWidth, vh = window.innerHeight;
+        for (const n of document.querySelectorAll(
+                'div,section,aside,dialog,[role="dialog"]')) {
+            if (hidden >= 8) break;
+            if (n.contains(el) || el.contains(n)) continue;
+            const cs = getComputedStyle(n);
+            if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
+            if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+            const b = n.getBoundingClientRect();
+            if (b.width * b.height < vw * vh * 0.45) continue;
+            if (b.top > vh || b.bottom < 0) continue;
+            hide(n);
+        }
+    } catch (e) {}
+
+    try {
+        for (const n of document.elementsFromPoint(cx, cy)) {
+            if (n === el) break;
+            // An ancestor is not an overlay — hiding it would hide the target
+            // too. Skip past it rather than stopping, because a tray whose
+            // wrapper happens to contain the whole page would otherwise end
+            // the search on its first step and nothing would be uncovered.
+            if (n.contains(el) || el.contains(n)) continue;
+            if (n === document.body || n === document.documentElement) continue;
+            if (hidden >= 8) break;
+            if (n.hasAttribute('data-tv-hid')) continue;
+            hide(n);
+        }
+    } catch (e) {}
+
+    const r2 = rectOf(el);
+    if (!r2.width || !r2.height) return null;
+    // Screen coordinates — the same frame the viewport screenshot is in.
+    return {x: r2.left, y: r2.top, w: r2.width, h: r2.height, hidden: hidden,
+            vw: window.innerWidth, vh: window.innerHeight,
+            onscreen: r2.bottom > 0 && r2.top < window.innerHeight
+                      && r2.right > 0 && r2.left < window.innerWidth};
+}
+"""
+
+SDR_UNRING_JS = r"""
+() => {
+    document.querySelectorAll('[data-tv-ring]').forEach(n => {
+        n.style.removeProperty('outline');
+        n.style.removeProperty('outline-offset');
+        n.removeAttribute('data-tv-ring');
+    });
+    document.querySelectorAll('[data-tv-hid]').forEach(n => {
+        const prev = n.getAttribute('data-tv-hid');
+        n.style.removeProperty('visibility');
+        if (prev && prev !== '__none__') n.style.visibility = prev;
+        n.removeAttribute('data-tv-hid');
+    });
+}
+"""
+
+
+async def _sdr_capture_click_shot(page, out_dir, excel_row, attempt, uid):
+    """The control about to be tested, ringed, in the state the audit found it.
+
+    This is the evidence a manual pass would paste beside the row: not a
+    description of what was clicked, but a picture of it. If the element
+    cannot be ringed there is nothing to show, so no file is written — a
+    screenshot of a page with nothing marked on it is not evidence.
+    """
+    if not uid:
+        return ""
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        box = await page.evaluate(SDR_RING_JS, uid)
+        if not box or not box.get("onscreen"):
+            try:
+                await page.evaluate(SDR_UNRING_JS)
+            except Exception:
+                pass
+            return ""
+        await asyncio.sleep(0.35)
+
+        path = os.path.join(out_dir, "row%s_try%d_click.png" % (excel_row, attempt))
+        await page.screenshot(path=path, animations="disabled")
+        try:
+            await page.evaluate(SDR_UNRING_JS)
+        except Exception:
+            pass
+        _crop_to_element(path, box)
+        _shrink_png(path)
+        return path
+    except Exception:
+        return ""
+
+
+def _crop_to_element(path, box, pad_x=170, pad_y=110):
+    """Cut the region around the ringed control out of a viewport screenshot.
+
+    The screenshot and the box are both in screen coordinates, so this holds
+    for a sticky header and a scrolled page alike.
+    """
+    try:
+        from PIL import Image
+        im = Image.open(path)
+        # A screenshot can be taken at a higher device pixel ratio than CSS.
+        scale = im.width / float(box.get("vw") or im.width)
+        left = max(0, int((box["x"] - pad_x) * scale))
+        top = max(0, int((box["y"] - pad_y) * scale))
+        right = min(im.width, int((box["x"] + box["w"] + pad_x) * scale))
+        bottom = min(im.height, int((box["y"] + box["h"] + pad_y) * scale))
+        if right - left < 20 or bottom - top < 20:
+            return
+        im.crop((left, top, right, bottom)).save(path, "PNG")
+    except Exception:
+        pass
+
+
+def _shrink_png(path, width=640):
+    """Keep a screenshot to what the workbook actually draws.
+
+    Every picture is carried inside the .xlsx, so a hundred-row SDR would
+    otherwise hand back a file of tens of megabytes.
+    """
+    try:
+        from PIL import Image
+        im = Image.open(path)
+        if im.width > width:
+            im = im.resize((width, max(1, int(im.height * width / im.width))),
+                           Image.LANCZOS)
+        im.convert("RGB").save(path, "PNG", optimize=True)
+    except Exception:
+        pass
+
+
+def _sdr_panel_html(r):
+    """An Omnibug-style read-out of the hit this row was judged on."""
+    import html as _h
+
+    status = r.get("status", "")
+    tone = {"PASS": "#15803d", "FAIL": "#b42318"}.get(status, "#6b7280")
+    ev = r.get("actual_event") or "(no event fired)"
+    mid = r.get("measurement_id") or "-"
+
+    # Show every expected parameter with its verdict, then anything else the
+    # hit carried — which is exactly the order a person reads Omnibug in.
+    rows, seen = [], set()
+    for d in r.get("param_diff", []):
+        seen.add(d["param"])
+        got = d.get("actual") or ""
+        ok = d.get("match")
+        mark = "✓" if ok and not d.get("cosmetic") else ("≈" if ok else "✕")
+        colour = "#15803d" if ok and not d.get("cosmetic") else ("#b45309" if ok else "#b42318")
+        rows.append(
+            '<tr><td class="m" style="color:%s">%s</td><td class="k">%s</td>'
+            '<td class="v">%s</td><td class="e">%s</td></tr>' % (
+                colour, mark, _h.escape(str(d["param"])),
+                _h.escape(str(got) if got else "(not sent)"),
+                "" if ok else "expected " + _h.escape(str(d.get("expected", "")))))
+    for k, v in (r.get("actual_params") or {}).items():
+        if k in seen:
+            continue
+        rows.append('<tr><td class="m" style="color:#9aa1ad">.</td><td class="k">%s</td>'
+                    '<td class="v">%s</td><td class="e"></td></tr>'
+                    % (_h.escape(str(k)), _h.escape(str(v))))
+    if not rows:
+        rows.append('<tr><td class="m" style="color:#b42318">X</td>'
+                    '<td class="k" colspan="3">no GA4 hit captured for this click</td></tr>')
+
+    return """<!doctype html><meta charset="utf-8"><style>
+    * { box-sizing: border-box; margin: 0; }
+    body { background: #fff; font: 12px/1.45 'Segoe UI', Arial, sans-serif; color: #14171f; }
+    .panel { width: 620px; border: 1px solid #d0d5dd; border-radius: 6px; overflow: hidden; }
+    .hd { padding: 7px 10px; background: #f7f8fa; border-bottom: 1px solid #e4e7ec;
+          display: flex; gap: 8px; align-items: baseline; }
+    .hd .ev { font-weight: 700; font-size: 13px; }
+    .hd .st { margin-left: auto; font-weight: 700; color: %s; }
+    .hd .id { color: #6b7280; font-size: 11px; }
+    table { width: 100%%; border-collapse: collapse; }
+    td { padding: 4px 8px; border-bottom: 1px solid #f0f2f5; vertical-align: top;
+         word-break: break-all; }
+    td.m { width: 26px; font-weight: 700; text-align: center; white-space: nowrap;
+           font-size: 13px; }
+    td.k { width: 168px; color: #3a4152; font-family: Consolas, monospace; }
+    td.v { font-family: Consolas, monospace; }
+    td.e { width: 190px; color: #b42318; font-size: 11px; }
+    tr:last-child td { border-bottom: none; }
+    </style>
+    <div class="panel">
+      <div class="hd"><span class="ev">%s</span><span class="id">%s</span>
+        <span class="st">%s</span></div>
+      <table>%s</table>
+    </div>""" % (tone, _h.escape(str(ev)), _h.escape(str(mid)), status, "".join(rows))
+
+
+async def _sdr_render_param_panels(browser, results, out_dir):
+    """Draw one panel image per row, in a single throwaway page.
+
+    Rendering after the run rather than during it keeps the audit itself at
+    the same speed — the data was already captured when the click happened.
+    """
+    made = 0
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        ctx = await browser.new_context(viewport={"width": 660, "height": 900},
+                                        device_scale_factor=2)
+        page = await ctx.new_page()
+        for r in results:
+            try:
+                await page.set_content(_sdr_panel_html(r), wait_until="load")
+                el = await page.query_selector(".panel")
+                if not el:
+                    continue
+                path = os.path.join(out_dir, "row%s_params.png" % r.get("excel_row"))
+                await el.screenshot(path=path)
+                r["shot_params"] = path
+                made += 1
+            except Exception:
+                continue
+        await ctx.close()
+    except Exception:
+        pass
+    return made
+
+
 def _sdr_clean(v):
     """Normalise one SDR cell. The template uses '-' for 'not applicable'."""
     if v is None:
@@ -4830,6 +5098,13 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     except Exception:
                         pass
 
+                # The control is open and reachable at this instant; once it
+                # is clicked the menu holding it usually closes and there is
+                # nothing left to point at. So the picture is taken now.
+                shot_click = await _sdr_capture_click_shot(
+                    page, SDR_SHOT_DIR, case["excel_row"], len(attempts) + 1,
+                    best.get("uid"))
+
                 clicked, click_method = False, ""
                 if hit and hit.get("ok"):
                     try:
@@ -5089,6 +5364,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     "matched": matched, "param_diff": list(param_diff),
                     "scoped": list(scoped), "best": best,
                     "click_method": click_method, "verified": verified,
+                    "shot_click": shot_click,
                 })
                 if status == "PASS":
                     break
@@ -5110,6 +5386,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             best = pick["best"]
             click_method = pick["click_method"]
             verified = pick["verified"]
+            shot_click = pick.get("shot_click", "")
             if len(attempts) > 1:
                 reasons.append(f"(tried {len(attempts)} candidate elements; reporting the closest fit)")
 
@@ -5122,6 +5399,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 "measurement_id": (matched or {}).get("measurement_id", ""),
                 "click_method": click_method,
                 "click_verified": verified,
+                "shot_click": shot_click,
             })
             # A page can hold dozens of rows and take ten minutes; waiting for
             # the page to end before saving would still lose most of a run
@@ -5162,6 +5440,15 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         # Page finished — checkpoint before moving to the next.
         _flush(partial=True)
 
+    # Draw the read-out panels now that every row has its captured hit. Doing
+    # it here, rather than during the audit, keeps the clicking at full speed.
+    try:
+        n_panels = await _sdr_render_param_panels(browser, results, SDR_SHOT_DIR)
+        if n_panels:
+            sys.stdout.write("[SDR] Rendered %d parameter panels" % n_panels + os.linesep)
+            sys.stdout.flush()
+    except Exception:
+        pass
     _flush(partial=False)
     try:
         await context.close()
@@ -5177,6 +5464,70 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
     sys.stdout.flush()
     return {"meta": parsed, "results": results,
             "detected_ga4_ids": sorted(detected_ids), "ga4_id": ga4_id}
+
+
+# How wide a screenshot is drawn inside a cell. Excel anchors a picture to a
+# cell rather than putting it in one, so the row has to be made tall enough
+# to hold it or the images overlap each other.
+SHOT_W = 300
+SHOT_COLS = ("Tool QA — Params Fired", "Tool QA — Click Screenshot")
+
+
+def _embed_shot(ws, path, row, col, width=SHOT_W):
+    """Anchor one PNG at a cell, scaled to `width`, and size the row for it.
+
+    Returns the drawn height in pixels so the caller can set the row height
+    to the tallest picture on that row.
+    """
+    from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.utils import get_column_letter
+    if not path or not os.path.exists(path):
+        return 0
+    try:
+        img = XLImage(path)
+        if img.width and img.width > width:
+            img.height = int(img.height * (width / img.width))
+            img.width = width
+        img.anchor = get_column_letter(col) + str(row)
+        ws.add_image(img)
+        return int(img.height or 0)
+    except Exception:
+        return 0
+
+
+def _add_shot_columns(ws, header_row, results, row_of=lambda r: r.get("excel_row")):
+    """Add the two picture columns at the end and fill them.
+
+    They go at the end rather than being inserted, so every column the sheet
+    already had keeps its position — a row's data is where it always was, with
+    the evidence appended beside it.
+    """
+    from openpyxl.styles import Font, Alignment, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    if not any(r.get("shot_params") or r.get("shot_click") for r in results):
+        return
+    c_par = ws.max_column + 1
+    c_click = c_par + 1
+    for col, name in ((c_par, SHOT_COLS[0]), (c_click, SHOT_COLS[1])):
+        h = ws.cell(header_row, col)
+        h.value = name
+        h.font = Font(bold=True, color="FFFFFF")
+        h.fill = PatternFill("solid", fgColor="4472C4")
+        h.alignment = Alignment(vertical="center", wrap_text=True)
+        ws.column_dimensions[get_column_letter(col)].width = SHOT_W / 7.0
+
+    for r in results:
+        row = row_of(r)
+        if not row:
+            continue
+        tall = max(_embed_shot(ws, r.get("shot_params"), row, c_par),
+                   _embed_shot(ws, r.get("shot_click"), row, c_click))
+        if tall:
+            # px -> points, and never shrink a row the sheet already sized.
+            want = tall * 0.75 + 4
+            cur = ws.row_dimensions[row].height or 0
+            ws.row_dimensions[row].height = max(cur, want)
 
 
 QA_DETAIL_SHEET = "Tool QA Details"
@@ -5262,6 +5613,9 @@ def write_sdr_verdicts(sdr_path, meta, results, out_path, qa_column=""):
                 cell.comment = c
             except Exception:
                 pass
+
+    # ---- the pictures, appended beside the row they belong to ----
+    _add_shot_columns(ws, header_row, results)
 
     # ---- the evidence sheet ----
     if QA_DETAIL_SHEET in wb.sheetnames:
@@ -5474,6 +5828,19 @@ async def main():
                 "Click Verified": "Yes" if r.get("click_verified") else "No",
             })
         pd.DataFrame(flat_rows).to_excel('sdr_results.xlsx', index=False)
+        # pandas cannot place pictures, so the two evidence columns are added
+        # in a second pass. flat_rows follows `results` in order, so row N of
+        # the sheet is result N.
+        try:
+            import openpyxl
+            _wb = openpyxl.load_workbook('sdr_results.xlsx')
+            _ws = _wb.active
+            _line = {id(r): i + 2 for i, r in enumerate(results)}
+            _add_shot_columns(_ws, 1, results, row_of=lambda r: _line.get(id(r)))
+            _wb.save('sdr_results.xlsx')
+        except Exception as _e:
+            sys.stdout.write("[SDR] Could not add evidence columns to the flat "
+                             "report: %s" % _e + os.linesep)
 
         # 2) The operator's own SDR, filled in. This is the deliverable they
         #    actually hand over: the same sheet, same rows, with the QA column
