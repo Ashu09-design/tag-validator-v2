@@ -3675,6 +3675,31 @@ LOGIN_FORM_JS = r"""
 """
 
 
+async def _sdr_goto(page, url, tries=3, timeout=45000):
+    """Load a page, allowing for the connection blinking.
+
+    A CDN in front of a client site will drop a connection now and then —
+    ERR_SSL_PROTOCOL_ERROR, ERR_TIMED_OUT, a reset — especially when an audit
+    is asking it for the same page repeatedly. One attempt turns that blink
+    into "Page did not load" against every row on the page, which reads like
+    a site-wide outage and throws away a run that was minutes from finishing.
+    Returns the last error, or "" when the page came up.
+    """
+    last = ""
+    for attempt in range(tries):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            if attempt:
+                sys.stdout.write("[SDR] Page loaded on attempt %d\n" % (attempt + 1))
+                sys.stdout.flush()
+            return ""
+        except Exception as e:
+            last = str(e)
+            if attempt + 1 < tries:
+                await asyncio.sleep(2.5 * (attempt + 1))
+    return last
+
+
 async def _sdr_try_login(page, user, pw):
     """Fill and submit a login form if the page is showing one.
 
@@ -4717,11 +4742,19 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         sys.stdout.write(f"[SDR] === {page_url} ({len(page_cases)} cases) ===\n")
         sys.stdout.flush()
 
-        try:
-            await page.goto(page_url, wait_until="domcontentloaded", timeout=45000)
-        except Exception as e:
+        err = await _sdr_goto(page, page_url)
+        if err:
+            # Not a tagging failure. "Fail" in a QA column is a claim about the
+            # tag; nothing was tested here, and saying otherwise puts false
+            # failures in front of whoever reads the sheet. The row is marked
+            # Not Tested with the reason, which is what actually happened.
             for c in page_cases:
-                _record(c, "FAIL", f"Page did not load: {str(e)[:90]}")
+                _record(c, "SKIPPED",
+                        f"Page did not load after 3 attempts — nothing was tested "
+                        f"on this row: {err[:70]}")
+            sys.stdout.write("[SDR] %s did not answer after 3 attempts — %d row(s) "
+                             "left Not Tested" % (page_url, len(page_cases)) + os.linesep)
+            sys.stdout.flush()
             continue
 
         if await _sdr_try_login(page, auth_user, auth_pass):
@@ -4891,7 +4924,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             reported for the row that means the promo one further down.
             """
             try:
-                await page.goto(page_url, wait_until="domcontentloaded", timeout=45000)
+                await _sdr_goto(page, page_url)
                 await _sdr_try_login(page, auth_user, auth_pass)
                 await asyncio.sleep(2.0)
                 try:
@@ -5692,8 +5725,13 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 # Fresh page per control. Clicking many things into one page
                 # state leaves the site re-rendered and its triggers detached,
                 # and the button then looks untagged when it is not.
+                # A page load per control is a lot to ask of a CDN in a tight
+                # loop; a breath between them keeps the audit from looking
+                # like something worth rate-limiting.
+                await asyncio.sleep(1.2)
                 try:
-                    await page.goto(page_url, wait_until="domcontentloaded", timeout=45000)
+                    if await _sdr_goto(page, page_url, tries=2):
+                        continue        # the site is not answering; skip this one
                     await _sdr_try_login(page, auth_user, auth_pass)
                     await asyncio.sleep(1.5)
                     await page.evaluate(BLOCK_NAVIGATION_JS)
