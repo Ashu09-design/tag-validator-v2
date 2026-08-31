@@ -118,11 +118,22 @@ function applyTheme(theme) {
     document.querySelectorAll('#themeToggle button').forEach(b =>
         b.classList.toggle('active', b.dataset.themeSet === theme));
 }
+function applyAccent(accent) {
+    document.documentElement.setAttribute('data-accent', accent);
+    localStorage.setItem('tv-accent', accent);
+    document.querySelectorAll('#accentPicker button').forEach(b =>
+        b.classList.toggle('active', b.dataset.accentSet === accent));
+}
 document.addEventListener('DOMContentLoaded', () => {
-    applyTheme(localStorage.getItem('tv-theme') || 'dark');
+    applyTheme(localStorage.getItem('tv-theme') || 'light');
     const toggle = document.getElementById('themeToggle');
     if (toggle) toggle.querySelectorAll('button').forEach(b =>
         b.onclick = () => applyTheme(b.dataset.themeSet));
+
+    applyAccent(localStorage.getItem('tv-accent') || 'violet');
+    const picker = document.getElementById('accentPicker');
+    if (picker) picker.querySelectorAll('button').forEach(b =>
+        b.onclick = () => applyAccent(b.dataset.accentSet));
 });
 
 document.addEventListener('DOMContentLoaded', () => {

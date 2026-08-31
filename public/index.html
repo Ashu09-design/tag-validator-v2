@@ -19,30 +19,29 @@
         * { margin: 0; padding: 0; }
 
         :root {
-            /* canvas + surfaces — a neutral gray, so the teal reads as the
-               only deliberate colour on the page */
-            --bg: #f6f7f6;
+            /* canvas + surfaces — deliberately neutral, so whichever accent
+               is chosen is the only colour in the chrome */
+            --bg: #f4f5f7;
             --surface: #ffffff;
-            --surface-2: #fafbfa;
-            --surface-3: #f0f2f1;
-            --border: #e2e5e3;
-            --border-strong: #cbd0cd;
-            --overlay: rgba(12, 20, 19, 0.45);
+            --surface-2: #fafbfc;
+            --surface-3: #eff1f4;
+            --border: #e2e5ea;
+            --border-strong: #c9cfd8;
 
             /* type */
-            --text: #171c1b;
-            --text-2: #3a4341;
-            --muted: #6b7472;
-            --faint: #9aa3a1;
+            --text: #14171f;
+            --text-2: #3a4152;
+            --muted: #6b7280;
+            --faint: #9aa1ad;
 
-            /* brand — deep petrol teal */
-            --accent: #0e7490;
-            --accent-hover: #155e75;
-            --accent-press: #164e63;
+            /* brand — the default; [data-accent] below swaps it */
+            --accent: #6d28d9;
+            --accent-hover: #5b21b6;
+            --accent-press: #4c1d95;
             --accent-on: #ffffff;
-            --accent-tint: #ecfeff;
-            --accent-edge: #a5f0fc;
-            --accent-ring: rgba(14, 116, 144, 0.18);
+            --accent-tint: #f5f3ff;
+            --accent-edge: #ddd6fe;
+            --accent-ring: rgba(109, 40, 217, 0.18);
 
             /* semantic — value / tint / edge */
             /* pass sits next to a teal accent, so it leans clearly green */
@@ -60,10 +59,10 @@
             --c-dim: #667085;
 
             /* elevation */
-            --sh-1: 0 1px 2px rgba(12, 20, 19, 0.05);
-            --sh-2: 0 1px 3px rgba(12, 20, 19, 0.08), 0 1px 2px rgba(12, 20, 19, 0.04);
-            --sh-3: 0 4px 12px rgba(12, 20, 19, 0.08), 0 2px 4px rgba(12, 20, 19, 0.04);
-            --sh-4: 0 12px 32px rgba(12, 20, 19, 0.12), 0 4px 8px rgba(12, 20, 19, 0.05);
+            --sh-1: 0 1px 2px rgba(15, 18, 26, 0.05);
+            --sh-2: 0 1px 3px rgba(15, 18, 26, 0.08), 0 1px 2px rgba(15, 18, 26, 0.04);
+            --sh-3: 0 4px 12px rgba(15, 18, 26, 0.08), 0 2px 4px rgba(15, 18, 26, 0.04);
+            --sh-4: 0 12px 32px rgba(15, 18, 26, 0.12), 0 4px 8px rgba(15, 18, 26, 0.05);
 
             /* geometry */
             --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-xl: 16px; --r-full: 999px;
@@ -89,27 +88,25 @@
         }
 
         [data-theme="dark"] {
-            --bg: #05090a;
-            --surface: #101a1b;
-            --surface-2: #162223;
-            --surface-3: #1d2c2c;
-            --border: #334746;
-            --border-strong: #4b6564;
-            --overlay: rgba(0, 0, 0, 0.66);
+            --bg: #06080b;
+            --surface: #12151c;
+            --surface-2: #171b23;
+            --surface-3: #1e232d;
+            --border: #2f3540;
+            --border-strong: #464e5d;
 
-            --text: #f2f6f5;
-            --text-2: #c6d2d0;
-            --muted: #93a3a1;
-            --faint: #6f807e;
+            --text: #f2f4f7;
+            --text-2: #c7cdd8;
+            --muted: #98a0ae;
+            --faint: #737b8a;
 
-            /* bright enough on a dark ground that it needs dark text on it */
-            --accent: #2dd4bf;
-            --accent-hover: #5eead4;
-            --accent-press: #14b8a6;
-            --accent-on: #05201b;
-            --accent-tint: rgba(45, 212, 191, 0.14);
-            --accent-edge: rgba(45, 212, 191, 0.40);
-            --accent-ring: rgba(45, 212, 191, 0.28);
+            --accent: #a78bfa;
+            --accent-hover: #c4b5fd;
+            --accent-press: #8b5cf6;
+            --accent-on: #1a1030;
+            --accent-tint: rgba(167, 139, 250, 0.15);
+            --accent-edge: rgba(167, 139, 250, 0.42);
+            --accent-ring: rgba(167, 139, 250, 0.30);
 
             --c-ok: #4ade80;      --t-ok: rgba(34, 197, 94, 0.12);      --e-ok: rgba(34, 197, 94, 0.32);
             --c-bad: #f87171;     --t-bad: rgba(239, 68, 68, 0.12);     --e-bad: rgba(239, 68, 68, 0.34);
@@ -129,6 +126,56 @@
 
             --log-bg: #080b11;
             --log-text: #c9d1d9;
+        }
+
+        /* ------------------------------------------------- accent presets
+           One attribute on <html> repoints the brand tokens. Everything that
+           paints itself with the accent — buttons, the active tab, focus
+           rings, the assistant — reads those tokens, so nothing else has to
+           know a choice was made. A light accent on a dark ground needs dark
+           text on it, which is why --accent-on travels with each preset. */
+        [data-accent="blue"] {
+            --accent: #1d4ed8; --accent-hover: #1e40af; --accent-press: #1e3a8a;
+            --accent-on: #ffffff; --accent-tint: #eff6ff; --accent-edge: #bfdbfe;
+            --accent-ring: rgba(29, 78, 216, 0.18);
+        }
+        [data-theme="dark"][data-accent="blue"] {
+            --accent: #60a5fa; --accent-hover: #93c5fd; --accent-press: #3b82f6;
+            --accent-on: #06152e; --accent-tint: rgba(96, 165, 250, 0.15);
+            --accent-edge: rgba(96, 165, 250, 0.42); --accent-ring: rgba(96, 165, 250, 0.30);
+        }
+
+        [data-accent="teal"] {
+            --accent: #0e7490; --accent-hover: #155e75; --accent-press: #164e63;
+            --accent-on: #ffffff; --accent-tint: #ecfeff; --accent-edge: #a5f0fc;
+            --accent-ring: rgba(14, 116, 144, 0.18);
+        }
+        [data-theme="dark"][data-accent="teal"] {
+            --accent: #2dd4bf; --accent-hover: #5eead4; --accent-press: #14b8a6;
+            --accent-on: #05201b; --accent-tint: rgba(45, 212, 191, 0.14);
+            --accent-edge: rgba(45, 212, 191, 0.40); --accent-ring: rgba(45, 212, 191, 0.28);
+        }
+
+        [data-accent="amber"] {
+            --accent: #b45309; --accent-hover: #92400e; --accent-press: #78350f;
+            --accent-on: #ffffff; --accent-tint: #fffbeb; --accent-edge: #fde68a;
+            --accent-ring: rgba(180, 83, 9, 0.18);
+        }
+        [data-theme="dark"][data-accent="amber"] {
+            --accent: #fbbf24; --accent-hover: #fcd34d; --accent-press: #f59e0b;
+            --accent-on: #241a02; --accent-tint: rgba(251, 191, 36, 0.14);
+            --accent-edge: rgba(251, 191, 36, 0.40); --accent-ring: rgba(251, 191, 36, 0.28);
+        }
+
+        [data-accent="graphite"] {
+            --accent: #1f2937; --accent-hover: #111827; --accent-press: #030712;
+            --accent-on: #ffffff; --accent-tint: #f3f4f6; --accent-edge: #d1d5db;
+            --accent-ring: rgba(31, 41, 55, 0.18);
+        }
+        [data-theme="dark"][data-accent="graphite"] {
+            --accent: #e5e7eb; --accent-hover: #f3f4f6; --accent-press: #d1d5db;
+            --accent-on: #0f1115; --accent-tint: rgba(229, 231, 235, 0.12);
+            --accent-edge: rgba(229, 231, 235, 0.34); --accent-ring: rgba(229, 231, 235, 0.26);
         }
 
         html { -webkit-text-size-adjust: 100%; }
@@ -217,6 +264,35 @@
             padding: 3px 9px; border-radius: var(--r-full);
             white-space: nowrap;
         }
+
+        .accent-picker {
+            display: inline-flex; gap: 5px; align-items: center;
+            padding: 4px 6px;
+            background: var(--surface-3);
+            border: 1px solid var(--border);
+            border-radius: var(--r-sm);
+        }
+        .accent-picker button {
+            width: 14px; height: 14px; padding: 0;
+            border: none; border-radius: 50%;
+            cursor: pointer;
+            box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.16);
+            transition: transform 0.12s ease;
+        }
+        .accent-picker button:hover { transform: scale(1.18); }
+        .accent-picker button.active {
+            box-shadow: 0 0 0 2px var(--surface-3), 0 0 0 3.5px var(--muted);
+        }
+        .sw-violet   { background: #6d28d9; }
+        .sw-blue     { background: #1d4ed8; }
+        .sw-teal     { background: #0e7490; }
+        .sw-amber    { background: #b45309; }
+        .sw-graphite { background: #1f2937; }
+        [data-theme="dark"] .sw-violet   { background: #a78bfa; }
+        [data-theme="dark"] .sw-blue     { background: #60a5fa; }
+        [data-theme="dark"] .sw-teal     { background: #2dd4bf; }
+        [data-theme="dark"] .sw-amber    { background: #fbbf24; }
+        [data-theme="dark"] .sw-graphite { background: #e5e7eb; }
 
         .theme-toggle {
             display: inline-flex; padding: 2px; gap: 2px;
@@ -939,6 +1015,8 @@
         (function () {
             var saved = localStorage.getItem('tv-theme') || 'light';
             document.documentElement.setAttribute('data-theme', saved);
+            document.documentElement.setAttribute(
+                'data-accent', localStorage.getItem('tv-accent') || 'violet');
         })();
     </script>
 </head>
@@ -967,6 +1045,13 @@
             <h1>Tag <span>Validator</span> Pro</h1>
         </div>
         <div class="nav-right">
+            <div class="accent-picker" id="accentPicker" title="Accent colour">
+                <button type="button" class="sw-violet" data-accent-set="violet" aria-label="Violet"></button>
+                <button type="button" class="sw-blue" data-accent-set="blue" aria-label="Blue"></button>
+                <button type="button" class="sw-teal" data-accent-set="teal" aria-label="Teal"></button>
+                <button type="button" class="sw-amber" data-accent-set="amber" aria-label="Amber"></button>
+                <button type="button" class="sw-graphite" data-accent-set="graphite" aria-label="Graphite"></button>
+            </div>
             <div class="theme-toggle" id="themeToggle" title="Toggle light / dark theme">
                 <button type="button" data-theme-set="light" aria-label="Light theme"><svg class="ic"><use href="#i-sun"/></svg></button>
                 <button type="button" data-theme-set="dark" aria-label="Dark theme"><svg class="ic"><use href="#i-moon"/></svg></button>
