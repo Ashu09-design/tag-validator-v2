@@ -5473,24 +5473,50 @@ SHOT_W = 300
 SHOT_COLS = ("Tool QA — Params Fired", "Tool QA — Click Screenshot")
 
 
-def _embed_shot(ws, path, row, col, width=SHOT_W):
-    """Anchor one PNG at a cell, scaled to `width`, and size the row for it.
+# A picture is anchored to a cell rather than held in one, so sorting or
+# filtering the sheet leaves it where it was. The cell itself therefore also
+# carries a link to the same file, which does travel with the row — and the
+# picture is nudged down far enough to leave that line readable.
+LINK_BAND_PX = 17
+_EMU_PER_PX = 9525
 
-    Returns the drawn height in pixels so the caller can set the row height
-    to the tallest picture on that row.
+
+def _embed_shot(ws, path, row, col, label, width=SHOT_W):
+    """Put one PNG at a cell: anchored picture, plus a link on the cell.
+
+    Returns the drawn height in pixels so the caller can size the row to the
+    tallest picture on it.
     """
     from openpyxl.drawing.image import Image as XLImage
-    from openpyxl.utils import get_column_letter
+    from openpyxl.drawing.spreadsheet_drawing import (
+        AnchorMarker, OneCellAnchor)
+    from openpyxl.drawing.xdr import XDRPositiveSize2D
+    from openpyxl.styles import Font
     if not path or not os.path.exists(path):
         return 0
     try:
+        full = os.path.abspath(path)
+        cell = ws.cell(row, col)
+        cell.value = label
+        try:
+            cell.hyperlink = "file:///" + full.replace("\\", "/")
+            cell.font = Font(color="0563C1", underline="single", size=9)
+        except Exception:
+            pass
+
         img = XLImage(path)
-        if img.width and img.width > width:
-            img.height = int(img.height * (width / img.width))
-            img.width = width
-        img.anchor = get_column_letter(col) + str(row)
+        w, h = img.width or width, img.height or width
+        if w > width:
+            h = int(h * (width / float(w)))
+            w = width
+        img.width, img.height = w, h
+        # Sit the picture just below the link line, in the same cell.
+        img.anchor = OneCellAnchor(
+            _from=AnchorMarker(col=col - 1, colOff=0,
+                               row=row - 1, rowOff=LINK_BAND_PX * _EMU_PER_PX),
+            ext=XDRPositiveSize2D(int(w * _EMU_PER_PX), int(h * _EMU_PER_PX)))
         ws.add_image(img)
-        return int(img.height or 0)
+        return int(h) + LINK_BAND_PX
     except Exception:
         return 0
 
@@ -5521,8 +5547,9 @@ def _add_shot_columns(ws, header_row, results, row_of=lambda r: r.get("excel_row
         row = row_of(r)
         if not row:
             continue
-        tall = max(_embed_shot(ws, r.get("shot_params"), row, c_par),
-                   _embed_shot(ws, r.get("shot_click"), row, c_click))
+        tall = max(
+            _embed_shot(ws, r.get("shot_params"), row, c_par, "open params PNG"),
+            _embed_shot(ws, r.get("shot_click"), row, c_click, "open screenshot PNG"))
         if tall:
             # px -> points, and never shrink a row the sheet already sized.
             want = tall * 0.75 + 4
