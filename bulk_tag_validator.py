@@ -3477,6 +3477,26 @@ async def _sdr_capture_click_shot(page, out_dir, excel_row, attempt, uid):
         os.makedirs(out_dir, exist_ok=True)
         box = await page.evaluate(SDR_RING_JS, uid)
         if not box or not box.get("onscreen"):
+            # A freshly loaded page has not built its lower half yet, and its
+            # menus are shut. A control that lives down there has no box to
+            # measure and no picture can be taken of it. Walk the page once to
+            # make it render, re-open what folds, and ask again.
+            try:
+                await page.evaluate(SDR_UNRING_JS)
+                await page.evaluate("""async () => {
+                    const step = 800;
+                    for (let y = 0; y < Math.min(document.body.scrollHeight, 20000); y += step) {
+                        window.scrollTo(0, y);
+                        await new Promise(r => setTimeout(r, 40));
+                    }
+                    window.scrollTo(0, 0);
+                }""")
+                await page.evaluate(EXPOSE_HIDDEN_JS)
+                await asyncio.sleep(0.6)
+                box = await page.evaluate(SDR_RING_JS, uid)
+            except Exception:
+                box = None
+        if not box or not box.get("onscreen"):
             try:
                 await page.evaluate(SDR_UNRING_JS)
             except Exception:
@@ -3810,6 +3830,43 @@ def _sweep_resolve(extras_for_page):
         e["reason"] = note
         if ambient:
             e["ambient_events"] = sorted(ambient)
+
+
+def _sdr_vocabulary(sdr_path):
+    """Every name and URL written anywhere in the SDR workbook.
+
+    A control counts as specified if the SDR mentions it at all — and an SDR
+    is routinely split across sheets, with the header nav on one tab and the
+    body on another. Judging "not in the SDR" only against the sheet being
+    validated reported a dozen buttons as missing that were written down on
+    the sheet next to it.
+    """
+    vocab = set()
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(sdr_path, read_only=True, data_only=True)
+        for name in wb.sheetnames:
+            ws = wb[name]
+            for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row or 1, 5000),
+                                    values_only=True):
+                for v in row:
+                    if isinstance(v, str):
+                        k = _sdr_vocab_key(v)
+                        if k:
+                            vocab.add(k)
+        try:
+            wb.close()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return vocab
+
+
+def _sdr_vocab_key(v):
+    """Comparable form of a name or URL: letters and digits only."""
+    t = re.sub(r"[^a-z0-9]+", " ", str(v or "").lower()).strip()
+    return t if 1 < len(t) < 120 else ""
 
 
 def _sweep_key(el):
@@ -4556,6 +4613,9 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
     """
     parsed = parse_sdr_file(sdr_path, sheet_name, base_url=start_url)
     cases = parsed["cases"]
+    # Anything named anywhere in the workbook is "in the SDR", whichever tab
+    # it was written on.
+    sdr_vocab = _sdr_vocabulary(sdr_path)
     sys.stdout.write(f"[SDR] Sheet '{parsed['sheet']}' -> {len(cases)} test cases\n")
     if ga4_id:
         sys.stdout.write(f"[SDR] Validating against GA4 property {ga4_id} (mode={ga4_mode})\n")
@@ -4600,6 +4660,20 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
 
     results = [done_by_row[r] for r in sorted(done_by_row)] if done_by_row else []
     detected_ids = set()
+
+    async def _draw_panels():
+        """Render any read-out panel that does not exist yet."""
+        pending = [r for r in results + extras
+                   if r.get("actual_event") and not r.get("shot_params")]
+        if not pending:
+            return
+        try:
+            n = await _sdr_render_param_panels(browser, pending, SDR_SHOT_DIR)
+            if n:
+                sys.stdout.write("[SDR] Rendered %d parameter panel(s)" % n + os.linesep)
+                sys.stdout.flush()
+        except Exception:
+            pass
 
     def _flush(partial=True):
         """Persist what has been validated so far.
@@ -5702,9 +5776,25 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         # of it, and a button that is on the page but not in the sheet is the
         # gap a manual pass is looking for. So every remaining control is
         # clicked too, and reported as tagged (with what it sent) or not.
+        def _in_sdr(el):
+            if _sweep_key(el) in tested_keys:
+                return True
+            if _sdr_vocab_key(el.get("text")) in sdr_vocab:
+                return True
+            href = str(el.get("href") or "")
+            if href and _sdr_vocab_key(href) in sdr_vocab:
+                return True
+            # A URL is written a dozen ways; compare the path as well.
+            try:
+                path = urlparse(href).path.strip("/")
+                if path and _sdr_vocab_key(path) in sdr_vocab:
+                    return True
+            except Exception:
+                pass
+            return False
+
         try:
-            leftovers = [e for e in await _fresh_elements()
-                         if _sweep_key(e) not in tested_keys]
+            leftovers = [e for e in await _fresh_elements() if not _in_sdr(e)]
         except Exception:
             leftovers = []
         if leftovers:
@@ -5889,6 +5979,11 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 sys.stdout.flush()
 
         _sweep_resolve(page_extras)
+        # Draw this page's read-outs now. Leaving them all to the end meant a
+        # run that was cancelled — or simply stopped because it was taking too
+        # long — handed back a workbook with no parameter evidence in it at
+        # all, for the rows as well as the extras.
+        await _draw_panels()
         if page_extras:
             n_tag = sum(1 for e in page_extras if e["status"] == "TAGGED")
             sys.stdout.write("[SDR] Not in SDR on this page: %d tagged, %d not tagged"
@@ -5898,17 +5993,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         # Page finished — checkpoint before moving to the next.
         _flush(partial=True)
 
-    # Draw the read-out panels now that every row has its captured hit. Doing
-    # it here, rather than during the audit, keeps the clicking at full speed.
-    try:
-        n_panels = await _sdr_render_param_panels(
-            browser, results + [e for e in extras if e.get("actual_event")],
-            SDR_SHOT_DIR)
-        if n_panels:
-            sys.stdout.write("[SDR] Rendered %d parameter panels" % n_panels + os.linesep)
-            sys.stdout.flush()
-    except Exception:
-        pass
+    await _draw_panels()
     _flush(partial=False)
     try:
         await context.close()
