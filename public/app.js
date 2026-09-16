@@ -8,6 +8,31 @@ function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Reports download through the browser's own download manager. Navigating
+// straight to one that doesn't exist yet replaced the whole app with a bare
+// error page (dropping a run being watched), so ask the server first.
+async function downloadReport(url) {
+    let head;
+    try {
+        head = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    } catch (e) {
+        alert('Could not reach the Tag Validator server — is it still running?');
+        return;
+    }
+    if (!head.ok) {
+        let msg = (await fetch(url, { cache: 'no-store' }).then(r => r.text()).catch(() => '')).trim();
+        try { msg = JSON.parse(msg).error || msg; } catch { /* plain text */ }
+        alert(msg && msg.length < 300 ? msg : 'That report is not available yet.');
+        return;
+    }
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+}
+
 function colorizeLogLines(logs) {
     return logs.map(l => {
         const text = String(l);
@@ -164,6 +189,7 @@ document.addEventListener('DOMContentLoaded', () => {
     runBtn.onclick = async () => {
         runBtn.disabled = true;
         runBtn.innerText = 'Validating...';
+        downloadBtn.classList.add('hidden');
         cancelBtn.classList.remove('hidden');
         cancelBtn.disabled = false;
         logBox.classList.remove('hidden');
@@ -213,7 +239,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Polling loop will detect !running and clean up UI state
     };
 
-    downloadBtn.onclick = () => window.location.href = '/api/tag-validator/download';
+    downloadBtn.onclick = () => downloadReport('/api/tag-validator/download');
 
     // --- QUICK RUN (single URL) ---
     const quickRunBtn = document.getElementById('quickRunBtn');
@@ -226,6 +252,7 @@ document.addEventListener('DOMContentLoaded', () => {
         quickRunBtn.disabled = true;
         quickRunBtn.innerText = '⚡ Running...';
         runBtn.disabled = true;
+        downloadBtn.classList.add('hidden');
         cancelBtn.classList.remove('hidden');
         cancelBtn.disabled = false;
         cancelBtn.innerText = 'Cancel';
@@ -274,6 +301,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     renderTable();
+    restoreLastReports();
 
     // --- SCHEDULER TAB LOGIC ---
     const uploadBoxS = document.getElementById('uploadBoxSchedule');
@@ -368,14 +396,36 @@ document.addEventListener('DOMContentLoaded', () => {
 const B = v => v === 'PASS' ? '<span class="badge b-pass">PASS</span>' : '<span class="badge b-fail">FAIL</span>';
 const ID = v => v ? '<span class="mono">' + v + '</span>' : '<span style="color:var(--muted)">--</span>';
 
-async function loadResults() {
+async function loadResults(restoring) {
     const r = await fetch('/api/tag-validator/results');
     const d = await r.json();
     if (!d.results || !d.results.length) return;
     cachedResults = d.results;
     document.getElementById('downloadBtn').classList.remove('hidden');
+    // Draw a restored report in the view it was made in: a GA4 report in the
+    // Tealium table shows every page as failing.
+    if (restoring && d.mode && d.mode !== currentAuditMode) return setAuditMode(d.mode);
     if (currentAuditMode === 'clicks') await loadClickResults();
     renderTable();
+}
+
+// A reload used to lose every finished report: the download buttons only
+// appeared at the end of a run watched from the same page. Put the last ones
+// back — but not while something is running, when they are about to be
+// replaced.
+async function restoreLastReports() {
+    try {
+        const s = await (await fetch('/api/tag-validator/status')).json();
+        if (s.running) return;
+        await loadResults(true);
+        const urls = (await (await fetch('/api/tag-validator/crawled-urls')).json()).urls || [];
+        if (!urls.length) return;
+        await loadDcCrawledUrls(urls);
+        // Quick runs write to the same report file, so only a report of these
+        // same pages belongs under this crawl.
+        const crawled = new Set(urls);
+        if (cachedResults.length && cachedResults.every(row => crawled.has(row.URL))) await loadDcResults(true);
+    } catch { /* nothing to restore */ }
 }
 
 function renderTable() {
@@ -648,7 +698,7 @@ async function loadHistory() {
             <td>${h.filename}</td>
             <td>${new Date(h.date).toLocaleString()}</td>
             <td>${(h.size / 1024).toFixed(1)} KB</td>
-            <td><button class="btn btn-download" style="padding:6px 12px" onclick="window.location.href='/api/schedule/download/${h.filename}'">Download</button></td>
+            <td><button class="btn btn-download" style="padding:6px 12px" onclick="downloadReport('/api/schedule/download/${encodeURIComponent(h.filename)}')">Download</button></td>
         </tr>
     `).join('');
 }
@@ -698,8 +748,8 @@ document.addEventListener('DOMContentLoaded', () => {
         pollDomainStatus(true);
     };
 
-    if (downloadUrlsBtn) downloadUrlsBtn.onclick = () => window.location.href = '/api/tag-validator/crawled-urls/download';
-    if (dcDownloadBtn) dcDownloadBtn.onclick = () => window.location.href = '/api/tag-validator/download';
+    if (downloadUrlsBtn) downloadUrlsBtn.onclick = () => downloadReport('/api/tag-validator/crawled-urls/download');
+    if (dcDownloadBtn) dcDownloadBtn.onclick = () => downloadReport('/api/tag-validator/download');
 
     const dcCancelBtn = document.getElementById('dcCancelBtn');
     if (dcCancelBtn) dcCancelBtn.onclick = async () => {
@@ -805,10 +855,8 @@ function pollDomainStatus(expectValidation) {
     }, 800);
 }
 
-async function loadDcCrawledUrls() {
-    const r = await fetch('/api/tag-validator/crawled-urls');
-    const d = await r.json();
-    const urls = d.urls || [];
+async function loadDcCrawledUrls(urls) {
+    if (!urls) urls = (await (await fetch('/api/tag-validator/crawled-urls')).json()).urls || [];
     const body = document.getElementById('dcUrlListBody');
     const countEl = document.getElementById('dcUrlCount');
     countEl.innerText = urls.length ? `· ${urls.length} pages` : '';
@@ -823,12 +871,13 @@ async function loadDcCrawledUrls() {
     document.getElementById('validateDiscoveredBtn').classList.remove('hidden');
 }
 
-async function loadDcResults() {
+async function loadDcResults(restoring) {
     const r = await fetch('/api/tag-validator/results');
     const d = await r.json();
     if (!d.results || !d.results.length) { renderDcTable(); return; }
     dcCachedResults = d.results;
     document.getElementById('dcDownloadBtn').classList.remove('hidden');
+    if (restoring && d.mode && d.mode !== dcMode) setDomainMode(d.mode);
     if (dcMode === 'clicks') {
         try {
             const cr = await (await fetch('/api/tag-validator/click-results')).json();
@@ -1560,7 +1609,9 @@ async function sdrLoadResults() {
     if (!rows.length) return;
 
     sdrEl('sdrDownloadFilled').classList.remove('hidden');
-    sdrEl('sdrDownloadReport').classList.remove('hidden');
+    // The filled SDR is kept current page by page; the flat report is only
+    // written once a run finishes.
+    sdrEl('sdrDownloadReport').classList.toggle('hidden', !!d.partial);
 
     const pass = rows.filter(r => r.status === 'PASS').length;
     const fail = rows.filter(r => r.status === 'FAIL').length;
@@ -1643,6 +1694,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (cancel) cancel.addEventListener('click', async () => {
         await fetch('/api/tag-validator/cancel', { method: 'POST' });
     });
+    ['sdrDownloadFilled', 'sdrDownloadReport'].forEach(id => {
+        const link = document.getElementById(id);
+        if (link) link.addEventListener('click', e => {
+            e.preventDefault();
+            downloadReport(link.getAttribute('href'));
+        });
+    });
     // Pick up an SDR that was uploaded in an earlier session.
     // Choosing a file uploads it immediately. Requiring a second click was a
     // trap: the picker kept showing the previous SDR's sheets and page URLs,
@@ -1663,6 +1721,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     }).catch(() => {});
+    // The last run's results and downloads were never put back after a
+    // reload or a server restart, though they were still on disk.
+    sdrLoadResults();
     sdrCheckResumable();
     // A run may still be going from before this page was opened.
     fetch('/api/tag-validator/status').then(r => r.json()).then(d => {

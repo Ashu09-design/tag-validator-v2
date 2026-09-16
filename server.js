@@ -26,10 +26,18 @@ if (!fs.existsSync(SCHEDULES_FILE)) fs.writeFileSync(SCHEDULES_FILE, JSON.string
 
 const upload = multer({ dest: 'uploads/' });
 
+// Every download gets a name of its own, stamped with when the report was
+// written. Browsers that don't number repeat downloads — the Claude app's
+// built-in one — silently replaced an older report of the same name.
+function fileStamp(p) {
+    const d = fs.statSync(p).mtime;
+    const two = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}_${two(d.getHours())}${two(d.getMinutes())}`;
+}
+
 // --- Manual Run Logic ---
 let validatorProcess = null;
 let validatorLogs = [];
-let lastRunMode = 'tealium';
 let cancelRequested = false;
 
 function killValidatorProcess(reason = 'cancelled by user') {
@@ -79,7 +87,6 @@ app.post('/api/tag-validator/run-single', (req, res) => {
     XLSX.writeFile(wb, path.join(__dirname, 'input_sites.xlsx'));
 
     const auditMode = mode || 'tealium';
-    lastRunMode = auditMode;
     cancelRequested = false;
     validatorLogs = [`Quick Run: ${url} (${auditMode.toUpperCase()} MODE)...`];
     const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
@@ -103,7 +110,6 @@ app.post('/api/tag-validator/run-single', (req, res) => {
 app.post('/api/tag-validator/run', (req, res) => {
     if (validatorProcess) return res.status(400).json({ error: 'Running' });
     const mode = req.body.mode || 'tealium'; // Default to tealium if not specified
-    lastRunMode = mode;
     cancelRequested = false;
     validatorLogs = [`Starting Manual Run (${mode.toUpperCase()} MODE)...` ];
     const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
@@ -128,19 +134,38 @@ app.get('/api/tag-validator/status', (req, res) => {
     res.json({ running: !!validatorProcess, cancelled: cancelRequested && !validatorProcess, logs: validatorLogs.slice(-20) });
 });
 
+// Which audit produced a validation report, read from its own header row.
+// Keeping the last run's mode in memory named the file wrongly after a server
+// restart, or after an SDR run in between ("Report-sdr.xlsx").
+function reportMode(ws) {
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    range.e.r = range.s.r;
+    const header = XLSX.utils.sheet_to_json(ws, { header: 1, range: XLSX.utils.encode_range(range) })[0] || [];
+    if (header.includes('Total_Elements')) return 'clicks';
+    if (header.includes('Tealium_Loaded')) return 'tealium';
+    if (header.includes('GA4_Fired')) return 'ga4';
+    return '';
+}
+
 app.get('/api/tag-validator/results', (req, res) => {
     const p = path.join(__dirname, 'validation_results.xlsx');
     if (!fs.existsSync(p)) return res.json({ results: [] });
     const wb = XLSX.readFile(p);
-    res.json({ results: XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]) });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    res.json({ results: XLSX.utils.sheet_to_json(ws), mode: reportMode(ws) });
 });
 
 app.get('/api/tag-validator/download', (req, res) => {
     const p = path.join(__dirname, 'validation_results.xlsx');
     if (!fs.existsSync(p))
         return res.status(404).send('No report yet — run a validation first.');
-    const label = { tealium: 'Tealium-Adobe', ga4: 'GA4-GTM', clicks: 'Click-Tracking' }[lastRunMode] || lastRunMode;
-    res.download(p, `Report-${label}.xlsx`);
+    let mode = '';
+    try {
+        const wb = XLSX.readFile(p, { sheetRows: 1 });
+        mode = reportMode(wb.Sheets[wb.SheetNames[0]]);
+    } catch { /* an unreadable header still gets the file handed over */ }
+    const label = { tealium: 'Tealium-Adobe', ga4: 'GA4-GTM', clicks: 'Click-Tracking' }[mode] || 'Tag-Validation';
+    res.download(p, `Report-${label}_${fileStamp(p)}.xlsx`);
 });
 
 // ============================================================
@@ -160,6 +185,25 @@ function currentSdrName() {
     try { return fs.readFileSync(SDR_NAME_PATH, 'utf8').trim(); } catch { return ''; }
 }
 
+// A run leaves three files, and they only make sense together. Moving just
+// the checkpoint aside left the previous run's flat report in place, and the
+// Flat report button handed that out — often another site's — mid-run.
+const SDR_OUTPUTS = ['sdr_results.json', 'sdr_filled.xlsx', 'sdr_results.xlsx'];
+
+function archiveSdrOutputs() {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    for (const name of SDR_OUTPUTS) {
+        const live = path.join(__dirname, name);
+        if (!fs.existsSync(live)) continue;
+        const ext = path.extname(name);
+        try {
+            fs.renameSync(live, path.join(__dirname, `${path.basename(name, ext)}.prev-${stamp}${ext}`));
+        } catch {
+            try { fs.unlinkSync(live); } catch {}
+        }
+    }
+}
+
 app.post('/api/sdr/upload', upload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     try {
@@ -169,13 +213,7 @@ app.post('/api/sdr/upload', upload.single('file'), (req, res) => {
         // A new SDR invalidates the previous run completely — different site,
         // different rows. Archive it rather than leaving it to be mistaken
         // for results belonging to this file.
-        const live = path.join(__dirname, 'sdr_results.json');
-        if (fs.existsSync(live)) {
-            try {
-                const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-                fs.renameSync(live, path.join(__dirname, `sdr_results.prev-${stamp}.json`));
-            } catch {}
-        }
+        archiveSdrOutputs();
     } catch (e) {
         return res.status(500).json({ error: 'Could not save file: ' + e.message });
     }
@@ -238,23 +276,8 @@ app.post('/api/sdr/run', (req, res) => {
     // last one the moment someone starts another (or mis-clicks Run) throws
     // away finished work that cannot be recovered. Archive it instead, so the
     // previous results are always still on disk.
-    if (!resume) {
-        const live = path.join(__dirname, 'sdr_results.json');
-        if (fs.existsSync(live)) {
-            try {
-                const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-                fs.renameSync(live, path.join(__dirname, `sdr_results.prev-${stamp}.json`));
-                const filled = path.join(__dirname, 'sdr_filled.xlsx');
-                if (fs.existsSync(filled)) {
-                    fs.renameSync(filled, path.join(__dirname, `sdr_filled.prev-${stamp}.xlsx`));
-                }
-            } catch {
-                try { fs.unlinkSync(live); } catch {}
-            }
-        }
-    }
+    if (!resume) archiveSdrOutputs();
 
-    lastRunMode = 'sdr';
     cancelRequested = false;
     validatorLogs = [`Starting SDR validation — sheet "${sheet || '(auto)'}" against ${ga4Id}...`];
     const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
@@ -300,10 +323,17 @@ app.get('/api/sdr/results', (req, res) => {
 // Two downloads: the operator's own SDR with verdicts filled in (what they
 // hand over), and a flat one-row-per-case report.
 app.get('/api/sdr/download', (req, res) => {
-    const which = (req.query.type || 'filled') === 'report' ? 'sdr_results.xlsx' : 'sdr_filled.xlsx';
-    const p = path.join(__dirname, which);
-    if (!fs.existsSync(p)) return res.status(404).send('No SDR report yet — run a validation first.');
-    res.download(p, which === 'sdr_filled.xlsx' ? 'SDR-QA-Filled.xlsx' : 'SDR-QA-Report.xlsx');
+    const flat = (req.query.type || 'filled') === 'report';
+    const p = path.join(__dirname, flat ? 'sdr_results.xlsx' : 'sdr_filled.xlsx');
+    if (!fs.existsSync(p)) {
+        return res.status(404).send(flat
+            ? 'No flat report yet — it is written when an SDR run finishes.'
+            : 'No SDR report yet — run a validation first.');
+    }
+    // Name it after the SDR it came from: runs for several sites otherwise
+    // pile up as indistinguishable "SDR-QA-Filled (8).xlsx".
+    const site = path.parse(currentSdrName()).name.replace(/[\\/:*?"<>|]+/g, '').replace(/^[\s_]+|\s+$/g, '');
+    res.download(p, `${flat ? 'SDR-QA-Report' : 'SDR-QA-Filled'}${site ? '_' + site : ''}_${fileStamp(p)}.xlsx`);
 });
 
 // === DOMAIN CRAWL: discover same-domain URLs ===
@@ -342,7 +372,6 @@ app.post('/api/tag-validator/crawl-and-validate', (req, res) => {
     const rawMax = parseInt(maxPages, 10);
     const max = (Number.isFinite(rawMax) && rawMax > 0) ? rawMax : 0;
     const auditMode = mode || 'tealium';
-    lastRunMode = auditMode;
 
     ['crawled_urls.xlsx', 'validation_results.xlsx', 'validation_results.json'].forEach(f => {
         const p = path.join(__dirname, f);
@@ -389,7 +418,7 @@ app.get('/api/tag-validator/crawled-urls', (req, res) => {
 app.get('/api/tag-validator/crawled-urls/download', (req, res) => {
     const p = path.join(__dirname, 'crawled_urls.xlsx');
     if (!fs.existsSync(p)) return res.status(404).send('No crawled URL list — run a crawl first.');
-    res.download(p, 'Crawled_URLs.xlsx');
+    res.download(p, `Crawled_URLs_${fileStamp(p)}.xlsx`);
 });
 
 // Rich per-element click tracking data (GA4 events + Adobe calls per click)
@@ -706,8 +735,12 @@ app.get('/api/schedule/history', (req, res) => {
 });
 
 app.get('/api/schedule/download/:filename', (req, res) => {
-    const p = path.join(HISTORY_DIR, req.params.filename);
-    if (fs.existsSync(p)) res.download(p);
+    // A bare .xlsx name from history/ only. The parameter arrives URL-decoded,
+    // so "..%2Fmail_config.json" walked out of the folder and served any file
+    // the server could read.
+    const name = req.params.filename;
+    const p = path.join(HISTORY_DIR, path.basename(name));
+    if (path.basename(name) === name && name.endsWith('.xlsx') && fs.existsSync(p)) res.download(p);
     else res.status(404).json({ error: 'Not found' });
 });
 
