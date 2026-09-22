@@ -1203,6 +1203,12 @@ EXPOSE_HIDDEN_JS = r"""
             const els = document.querySelectorAll(sel);
             for (const el of els) {
                 if (!isVisible(el)) continue;
+                // Flipping a card is not revealing anything hidden, it just
+                // turns the card over. A carousel's flip buttons are named
+                // "...flip-toggle" and were being pressed here, so every card
+                // sat on its back and every row that meant the front of a card
+                // was judged on the back's beacon.
+                if (el.matches('[class*="flip"], [aria-label*="flip" i]')) continue;
                 try { el.click(); actedThisRound++; } catch(e) {}
                 if (actedThisRound > 150) break;   // don't blow up huge pages in one round
             }
@@ -1283,19 +1289,40 @@ async (el) => {
         }
     }
 
-    const NEXT = '[class*="next"],[aria-label*="next" i],[title*="next" i],'
-               + '[class*="arrow-right"],[class*="chevron-right"],'
+    // The arrows and the slide indicators often sit OUTSIDE the element that
+    // carries the carousel class — on this site they are in the wrapper above
+    // it — so search a few levels further up as well.
+    const roots = chain.slice();
+    for (let n = chain[chain.length - 1].parentElement, i = 0; n && i < 3; n = n.parentElement, i++) {
+        roots.push(n);
+    }
+
+    const NEXT = '[class*="arrow-next"],[class*="next"],[aria-label*="next" i],'
+               + '[title*="next" i],[class*="arrow-right"],[class*="chevron-right"],'
                + '.swiper-button-next,.slick-next';
-    for (let ci = chain.length - 1; ci >= 0; ci--) {      // outermost strip first
+    for (let ri = 0; ri < roots.length; ri++) {
         for (let i = 1; i <= 8; i++) {
-            const next = chain[ci].querySelector(NEXT);
+            const next = roots[ri].querySelector(NEXT);
             if (!next) break;
             try { next.click(); } catch (e) { break; }
-            await sleep(500);
+            await sleep(600);
             try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
             await sleep(150);
             if (reachable()) return {ok: true, tries: i, how: 'advanced the carousel'};
         }
+    }
+
+    // Last resort: the pagination dots jump straight to a slide.
+    for (const root of roots) {
+        const dots = [...root.querySelectorAll('[class*="indicator"],[role="tab"]')];
+        for (let i = 0; i < dots.length && i < 12; i++) {
+            try { dots[i].click(); } catch (e) { continue; }
+            await sleep(600);
+            try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+            await sleep(150);
+            if (reachable()) return {ok: true, tries: i + 1, how: 'jumped to the slide'};
+        }
+        if (dots.length) break;
     }
     return {ok: false, tries: 0, why: 'could not bring the card into view'};
 }
