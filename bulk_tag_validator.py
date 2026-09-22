@@ -3939,6 +3939,25 @@ def _sdr_is_click_event(name):
     return bool(_SDR_CLICK_EVENT_RE.search(_norm_str(name).replace(' ', '_')))
 
 
+# A row often names one state of a toggle: "… approved uses - See more". The
+# pass that reveals hidden content flips those toggles, so by the time the row
+# is tested the page offers only "See Less" and the control the row means does
+# not exist at all.
+SDR_TOGGLE_STATES = (("see more", "see less"), ("show more", "show less"),
+                     ("read more", "read less"), ("view more", "view less"),
+                     ("expand", "collapse"))
+
+
+def _sdr_toggle_state(name):
+    """The toggle state a row names, and its counterpart. ('', '') if none."""
+    n = _norm_str(name)
+    for a, b in SDR_TOGGLE_STATES:
+        for want, other in ((a, b), (b, a)):
+            if n == want or n.endswith(' ' + want) or (' ' + want + ' ') in n:
+                return want, other
+    return '', ''
+
+
 def _sdr_norm_header(h):
     """A header reduced to comparable words.
 
@@ -5207,6 +5226,56 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 if bs2 > best_score:
                     best, best_score = b2, bs2
                     candidates = _ordered(alt)
+            # A toggle the row names by state — "… - See more" — is gone from
+            # the page once the reveal pass has flipped it to "See Less", and
+            # the row then gets judged on whatever else scored closest. Put the
+            # toggle back into the state the row names and look again.
+            toggled = False
+            _want_state, _other_state = _sdr_toggle_state(case.get("button_name") or "")
+            if (_want_state
+                    and not any(_want_state in _norm_str(e.get("text")) for e in elements)):
+                _flip = next((e for e in elements
+                              if _norm_str(e.get("text")) == _other_state), None)
+                if _flip is not None:
+                    try:
+                        _fl = page.locator(f'[data-tvuid="{_flip["uid"]}"]').first
+                        if await _fl.count() > 0:
+                            await _fl.click(timeout=2500)
+                            await asyncio.sleep(0.9)
+                            # Flipping the toggle is itself a tracked click on
+                            # this site, and its beacon is queued like any
+                            # other. Let it go out before the row opens its own
+                            # window, or the row is judged on the audit's
+                            # housekeeping click.
+                            # Flipping is itself a tracked click here, and the
+                            # site labels a toggle's event with the state it
+                            # lands on — so the flip's beacon looks exactly
+                            # like the one this row is waiting for. Hold until
+                            # that beacon has gone out (a click report, not the
+                            # scroll and compliance hits that ride along), so
+                            # the row's own window starts clean.
+                            _flip_until = time.time() + SDR_QUEUED_BEACON_WAIT
+                            _flip_from = len(all_requests)
+                            while time.time() < _flip_until:
+                                await asyncio.sleep(0.25)
+                                if any(_sdr_is_click_event(ev.get("event"))
+                                       for r in all_requests[_flip_from:]
+                                       if '/g/collect' in r["url"]
+                                       for ev in parse_ga4_event(r["url"], r["post"])):
+                                    break
+                            await asyncio.sleep(1.0)
+                            toggled = True
+                            elements = await _fresh_elements()
+                            scored_now = _score_all(elements)
+                            best, best_score = _pick_best(scored_now)
+                            candidates = _ordered(scored_now)
+                            sys.stdout.write(
+                                f"[SDR]   put '{_other_state}' back to '{_want_state}'"
+                                f" so this row's control exists\n")
+                            sys.stdout.flush()
+                    except Exception:
+                        pass
+
             if best is None or best_score < 4:
                 # Distinguish "this content is no longer on the page" from
                 # "the control is there but could not be matched". The first
@@ -5701,6 +5770,15 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                         reasons.append(
                             f"Expected event '{expected_event}' did not fire"
                             + (f". Events seen: {', '.join(fired)}" if fired else " (no GA4 event fired)"))
+                    if not verified:
+                        # The click was never seen landing on this element, so
+                        # "did not fire" may be about the wrong control — the
+                        # one the row names may not be on the page in the state
+                        # the audit put it in.
+                        reasons.append(
+                            f"click not verified on {(best.get('text') or '')[:40]!r}, which was only"
+                            f" the closest match to {(case.get('button_name') or '')[:50]!r}"
+                            " — this may be the wrong control rather than a missing tag")
                 else:
                     actual_params = matched.get("params") or {}
                     for pname, pexp in case["expected_params"].items():
@@ -5773,7 +5851,14 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 # what GA4 records. A second property receiving its own single
                 # click event is dual tagging, not a duplicate.
                 dup_by_prop = {}
-                for e in scoped:
+                # Only a row decided on ONE click can be judged for double
+                # counting. A second candidate, or a retry, clicks the same
+                # control again — its beacon is identical to the first one's
+                # and a queued flush can land both in one window, which read as
+                # the site counting a click twice when it was the audit.
+                single_click = (_cand_i == 0 and not toggled
+                                and 'cdp-retry' not in (click_method or ''))
+                for e in scoped if single_click else []:
                     # Only this element's own hits count. The same batch often
                     # carries clicks made earlier on other controls, and
                     # counting those failed a row for someone else's doing.
