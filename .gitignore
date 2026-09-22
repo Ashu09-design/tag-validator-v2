@@ -25,8 +25,13 @@ sdr_filled.prev-*.xlsx
 sdr_results.prev-*.xlsx
 sdr_results.BACKUP.json
 sdr_filled.BACKUP.xlsx
-sdr_run_*.json
+sdr_run*.json
 SDR-Filled_*.xlsx
+SDR-Result_*.xlsx
+
+# Cost/planning workbooks. They carry internal day rates and client volumes,
+# and this repo deploys to a public Space.
+AI-Solution-Register_*.xlsx
 sdr_input.xlsx
 sdr_input.name.txt
 sdr_filled.xlsx
