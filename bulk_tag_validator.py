@@ -837,22 +837,49 @@ DISCOVER_CLICKABLES_JS = r"""
     } catch(e) {}
 
     function shouldIgnoreElement(el) {
+        // The consent tool's own footer opener is a page link like any other:
+        // it opens the preference centre and changes no consent. SDRs list it
+        // ("Cookies Settings"), so it is testable even though it belongs to
+        // the widget whose insides are otherwise left alone.
+        try {
+            if (el.matches('#ot-sdk-btn, .ot-sdk-show-settings, .optanon-show-settings,'
+                           + ' #onetrust-pc-btn-handler')) {
+                return false;
+            }
+        } catch (e) {}
         let cur = el;
         while (cur && cur !== document.body && cur !== document.documentElement) {
             const id = (cur.id || '').toLowerCase();
             const className = (typeof cur.className === 'string' ? cur.className : '').toLowerCase();
             
-            if (id.includes('cookie') || id.includes('consent') || id.includes('onetrust') || id.includes('ot-') || id.includes('privacy') || id.includes('emu-consent') || id.includes('chat-') || id.includes('chatbot') || id.includes('ai-assistant')) {
+            // Only the consent widget itself is off limits. Matching the bare
+            // word "privacy" swallowed the footer's own legal links — Privacy
+            // Notice, Consumer Health Data Privacy Notice, Your Privacy
+            // Choices — which sit in a list classed "privacy" and are exactly
+            // what an SDR asks to test. Those rows then landed on a
+            // neighbouring footer link, or on a hidden copy with no box.
+            const CONSENT_HOST = /onetrust|optanon|ot-sdk|ot-pc|truste|emu-consent|cookie-?banner|cookie-?consent|cookie-?notice|consent-?banner|consent-?modal|consent-?manager/;
+            if (CONSENT_HOST.test(id) || CONSENT_HOST.test(className)) {
                 return true;
             }
-            if (className.includes('cookie') || className.includes('consent') || className.includes('onetrust') || className.includes('ot-') || className.includes('privacy') || className.includes('chat-') || className.includes('chatbot') || className.includes('assistant-chat')) {
+            if (id.includes('chat-') || id.includes('chatbot') || id.includes('ai-assistant')
+                || className.includes('chat-') || className.includes('chatbot')
+                || className.includes('assistant-chat')) {
                 return true;
             }
             cur = cur.parentElement;
         }
         
         const ownText = (el.innerText || el.value || '').toLowerCase().trim();
-        if (ownText.includes('cookie settings') || ownText.includes('cookies settings') || ownText.includes('cookie preferences') || ownText.includes('manage cookies') || ownText.includes('accept cookies') || ownText.includes('reject cookies') || ownText.includes('accept all') || ownText.includes('reject all')) {
+        // Never press a control that CHANGES consent — the rest of the run
+        // would be measured under a different consent state. A control that
+        // merely opens the preference centre is fair game: SDRs list
+        // "Cookies Settings" as a row, and the panel it opens is dismissed
+        // before the next click anyway.
+        if (ownText.includes('accept cookies') || ownText.includes('reject cookies')
+            || ownText.includes('accept all') || ownText.includes('reject all')
+            || ownText.includes('allow all') || ownText.includes('deny all')
+            || ownText.includes('confirm my choices') || ownText.includes('save preferences')) {
             return true;
         }
         
