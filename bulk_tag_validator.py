@@ -1254,17 +1254,56 @@ EXPOSE_HIDDEN_JS = r"""
 CAROUSEL_REVEAL_JS = r"""
 async (el) => {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-    const reachable = () => {
+
+    // The strip's clipping box is what decides which card is "the one on
+    // screen". Hit-testing the point does not: a flip card lays its face over
+    // its own button, so elementFromPoint answers with the face and even the
+    // card in view looks unreachable.
+    // The OUTERMOST clipping ancestor, not the first one: a flip card clips
+    // its own faces, and stopping there makes every card look like it is on
+    // screen inside itself.
+    let clip = null;
+    for (let n = el.parentElement, i = 0; n && i < 14; n = n.parentElement, i++) {
+        // The strip is the box that actually hides slides: it clips, and it
+        // holds far more width than it shows. A page-level wrapper also clips
+        // but hides nothing, and taking that one made every card look as if
+        // it were already on screen.
+        if (n.scrollWidth <= n.clientWidth + 50 || n.clientWidth <= 300) continue;
+        const ox = getComputedStyle(n).overflowX;
+        if (ox === 'hidden' || ox === 'auto' || ox === 'scroll') {
+            clip = n;
+            break;
+        }
+    }
+    // scrollIntoView will happily scroll a clipped strip sideways — an
+    // overflow:hidden box still scrolls from script — which parks the card in
+    // view without the carousel knowing. Its own script then snaps back and
+    // the click lands on whatever slide it decides to show. So the strip's
+    // scroll is put back to nothing before measuring, and the carousel is
+    // moved only through its own controls.
+    const settle = async () => {
+        try { if (clip) clip.scrollLeft = 0; } catch (e) {}
+        try { el.scrollIntoView({block: 'center', inline: 'nearest'}); } catch (e) {}
+        try { if (clip) clip.scrollLeft = 0; } catch (e) {}
+        await sleep(250);
+    };
+    const onScreen = () => {
         const r = el.getBoundingClientRect();
         if (r.width < 2 || r.height < 2) return false;
-        const x = r.left + r.width / 2, y = r.top + r.height / 2;
-        if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
-        const top = document.elementFromPoint(x, y);
-        return !!top && (top === el || el.contains(top) || top.contains(el));
+        if (r.bottom < -50 || r.top > innerHeight + 50) return false;
+        if (!clip) {
+            const cx = r.left + r.width / 2;
+            return cx > 0 && cx < innerWidth;
+        }
+        // Fully inside the strip's window. A carousel that shows the edge of
+        // the next card would otherwise count that peek as the card being on
+        // screen, and the click would land on the card in the middle.
+        const cr = clip.getBoundingClientRect();
+        return r.left >= cr.left - 2 && r.right <= cr.right + 2;
     };
-    try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
-    await sleep(200);
-    if (reachable()) return {ok: true, tries: 0};
+    await settle();
+    if (onScreen()) return {ok: true, tries: 0, inCarousel: !!clip};
+    const reachable = onScreen;
 
     // Every carousel-ish or horizontally scrollable ancestor, innermost first.
     // The card itself is often named "…carousel-slide-card", so closest() on
@@ -1277,17 +1316,8 @@ async (el) => {
             chain.push(n);
         }
     }
-    if (!chain.length) return {ok: false, tries: 0, why: 'not inside a carousel'};
-
-    // Some strips are plain overflow: move the scroll rather than press a button.
-    for (const box of chain) {
-        if (box.scrollWidth > box.clientWidth + 20) {
-            const br = box.getBoundingClientRect(), er = el.getBoundingClientRect();
-            box.scrollLeft += (er.left + er.width / 2) - (br.left + br.width / 2);
-            await sleep(400);
-            if (reachable()) return {ok: true, tries: 0, how: 'scrolled the strip'};
-        }
-    }
+    if (!chain.length) return {ok: false, tries: 0, inCarousel: false,
+                               why: 'not inside a carousel'};
 
     // The arrows and the slide indicators often sit OUTSIDE the element that
     // carries the carousel class — on this site they are in the wrapper above
@@ -1300,16 +1330,27 @@ async (el) => {
     const NEXT = '[class*="arrow-next"],[class*="next"],[aria-label*="next" i],'
                + '[title*="next" i],[class*="arrow-right"],[class*="chevron-right"],'
                + '.swiper-button-next,.slick-next';
-    for (let ri = 0; ri < roots.length; ri++) {
-        for (let i = 1; i <= 8; i++) {
-            const next = roots[ri].querySelector(NEXT);
-            if (!next) break;
-            try { next.click(); } catch (e) { break; }
-            await sleep(600);
-            try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
-            await sleep(150);
-            if (reachable()) return {ok: true, tries: i, how: 'advanced the carousel'};
+    // A page can hold several copies of the arrow, only one of them rendered;
+    // querySelector would keep handing back a 0x0 one that does nothing.
+    const pickNext = () => {
+        for (const root of roots) {
+            for (const b of root.querySelectorAll(NEXT)) {
+                const r = b.getBoundingClientRect();
+                if (r.width > 2 && r.height > 2 && !b.disabled
+                        && b.getAttribute('aria-disabled') !== 'true') {
+                    return b;
+                }
+            }
         }
+        return null;
+    };
+    for (let i = 1; i <= 10; i++) {
+        const next = pickNext();
+        if (!next) break;
+        try { next.click(); } catch (e) { break; }
+        await sleep(650);
+        await settle();
+        if (onScreen()) return {ok: true, tries: i, inCarousel: true, how: 'advanced the carousel'};
     }
 
     // Last resort: the pagination dots jump straight to a slide.
@@ -1320,11 +1361,24 @@ async (el) => {
             await sleep(600);
             try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
             await sleep(150);
-            if (reachable()) return {ok: true, tries: i + 1, how: 'jumped to the slide'};
+            if (reachable()) return {ok: true, tries: i + 1, inCarousel: true, how: 'jumped to the slide'};
         }
         if (dots.length) break;
     }
-    return {ok: false, tries: 0, why: 'could not bring the card into view'};
+
+    // Last resort, and only because some strips really are plain overflow: a
+    // widget driven by transforms will snap back from this, which is why it
+    // comes after its own controls rather than before them.
+    for (const box of chain) {
+        if (box.scrollWidth > box.clientWidth + 20) {
+            const br = box.getBoundingClientRect(), er = el.getBoundingClientRect();
+            box.scrollLeft += (er.left + er.width / 2) - (br.left + br.width / 2);
+            await sleep(500);
+            if (onScreen()) return {ok: true, tries: 0, inCarousel: true, how: 'scrolled the strip'};
+        }
+    }
+    return {ok: false, tries: 0, inCarousel: true,
+            why: 'could not bring the card into view'};
 }
 """
 
@@ -4779,6 +4833,15 @@ def _sdr_score_element(case, el, base_url=""):
         elif 'site_link' in want_ev:
             score += 2 if not leaves else -2
 
+    # A hidden copy of a control is not the one anybody clicked. These pages
+    # carry the same legal links twice — once in the footer, once inside a
+    # collapsed ISI block — and the hidden copy has no box at all, so a click
+    # aimed at it lands on whatever sits underneath. The penalty is small
+    # enough that a control which only exists inside a menu can still win when
+    # there is no visible twin.
+    if el.get('hidden'):
+        score -= 6
+
     ctype = (case.get('click_type') or '').lower()
     if 'download' in ctype and el.get('is_download'):
         score += 3
@@ -5316,11 +5379,15 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             # that follow — which is how the ISI phone number went missing and
             # its row landed on the footer's phone number instead.
             if state_dirty:
-                try:
-                    await page.evaluate(EXPOSE_HIDDEN_JS)
-                    await asyncio.sleep(0.6)
-                except Exception:
-                    pass
+                # The row before moved something that stays moved: a carousel
+                # advanced, a card turned over, a panel collapsed. Re-revealing
+                # does not undo any of that, and the rows after it were being
+                # judged on a page arranged by the audit rather than the one a
+                # visitor meets. Start this row from a page that has just
+                # loaded instead.
+                refreshed = await _reset_page()
+                if refreshed:
+                    base_elements = refreshed
                 state_dirty = False
             fresh = await _fresh_elements()
             elements = fresh or base_elements
@@ -5541,19 +5608,6 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 except Exception:
                     pass
 
-                # Only a carousel's current slide can be clicked. The row names
-                # a card — "meet the artisan - Baggu Bag" — that may be several
-                # slides along, and clicking it where it sits lands on whatever
-                # card is showing instead.
-                try:
-                    _rev = await loc_el.evaluate(CAROUSEL_REVEAL_JS)
-                    if _rev and _rev.get("tries"):
-                        sys.stdout.write(
-                            "[SDR]   advanced the carousel %d slide(s) to reach this row's card\n"
-                            % _rev["tries"])
-                        sys.stdout.flush()
-                except Exception:
-                    pass
 
                 # Clear any consent panel before EVERY click, not only when a
                 # hit-test has already failed. OneTrust's preference centre
@@ -5597,6 +5651,25 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 except Exception:
                     pass
                 await asyncio.sleep(0.6)
+
+                # Only a carousel's current slide can be clicked. The row names
+                # a card — "meet the artisan - Baggu Bag" — that may be several
+                # slides along, and clicking it where it sits lands on whatever
+                # card is showing instead. This is the last thing done before
+                # the click: the vertical scrolling above moves the strip back
+                # if it runs afterwards.
+                try:
+                    _rev = await loc_el.evaluate(CAROUSEL_REVEAL_JS)
+                    if _rev and _rev.get("inCarousel"):
+                        # Whatever this row does to the carousel outlives it.
+                        state_dirty = True
+                    if _rev and _rev.get("tries"):
+                        sys.stdout.write(
+                            "[SDR]   advanced the carousel %d slide(s) to reach this row's card\n"
+                            % _rev["tries"])
+                        sys.stdout.flush()
+                except Exception:
+                    pass
 
                 # --- drain, then open this case's capture window ---
                 try:
