@@ -3895,6 +3895,33 @@ def _sdr_clean(v):
     return '' if s.lower() in SDR_SKIP_VALUES else s
 
 
+# A page written without its scheme \u2014 "Natrellecares.com", "www.site.com/care"
+# \u2014 is still a page, and it is how most SDRs name one. Only a cell actually
+# shaped like a host is promoted to a URL: a section title, "All Pages" or an
+# attached file name must not become one by accident.
+_SDR_HOSTLIKE = re.compile(
+    r'^(?:www\.)?(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,24}(?::\d{2,5})?(?:[/?#]\S*)?$',
+    re.I)
+_SDR_NOT_HOSTS = {'xlsx', 'xls', 'csv', 'pdf', 'doc', 'docx', 'ppt', 'pptx',
+                  'png', 'jpg', 'jpeg', 'gif', 'svg', 'zip', 'txt', 'json',
+                  'html', 'htm', 'js', 'css'}
+
+
+def _sdr_page_url(value):
+    """The cell as a URL a browser can open, or '' if it is not one."""
+    s = (value or '').strip()
+    if not s or s.lower() in SDR_GLOBAL_URLS:
+        return ''
+    if re.match(r'^https?://', s, re.I):
+        return s
+    if s.startswith('//'):
+        return 'https:' + s
+    host = re.split(r'[/?#]', s, 1)[0]
+    if '.' not in host or host.rsplit('.', 1)[-1].lower() in _SDR_NOT_HOSTS:
+        return ''
+    return 'https://' + s if _SDR_HOSTLIKE.match(s) else ''
+
+
 def _sdr_norm_header(h):
     """A header reduced to comparable words.
 
@@ -4077,8 +4104,10 @@ def list_sdr_sheets(sdr_path):
                                   for cc in p_cols)
                 if ident and ev:
                     rows += 1
-                    if last and last not in urls:
-                        urls.append(last)
+                    if last:
+                        shown = _sdr_page_url(last) or last
+                        if shown not in urls:
+                            urls.append(shown)
             out.append({
                 "name": ws.title,
                 "header_row": hr,
@@ -4170,6 +4199,8 @@ def parse_sdr_file(sdr_path, sheet_name=None, base_url=""):
         eff = page_url
         if (not eff) or eff.lower() in SDR_GLOBAL_URLS:
             eff = base_url or ''
+        # The sheet may name the page without a scheme; open it anyway.
+        eff = _sdr_page_url(eff) or eff
         cases.append({
             "excel_row": r,
             "sheet": ws.title,
@@ -6402,7 +6433,7 @@ async def main():
         ga4_id = (getattr(args, 'ga4_id', '') or '').strip()
         ga4_mode = (getattr(args, 'ga4_mode', '') or 'specific').strip()
 
-        start_url = (args.start_url or '').strip()
+        start_url = _sdr_page_url(args.start_url or '')
         if not start_url:
             probe = parse_sdr_file(sdr_path, sheet_name)
             for c in probe.get("cases", []):
