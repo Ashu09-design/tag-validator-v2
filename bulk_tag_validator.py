@@ -4843,23 +4843,42 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         except Exception:
             pass
 
-    try:
-        context.on("request", on_pw_request)
-    except Exception:
-        pass
-
-    page = await context.new_page()
-    await stealth_obj.apply_stealth_async(page)
-    cdp = await context.new_cdp_session(page)
-    await cdp.send("Network.enable")
-
     def on_cdp_req(params):
         try:
             req = params.get("request", {}) or {}
             _push_req(req.get("url", ""), req.get("postData", "") or "", time.time())
         except Exception:
             pass
-    cdp.on("Network.requestWillBeSent", on_cdp_req)
+
+    page = cdp = None
+
+    async def _new_session(first=False):
+        """Start over in a brand-new browser context.
+
+        Reloading is not enough on every site. natrellecares.com binds its own
+        click tags on the first page load of a session and never again: after a
+        reload only GA4's built-in click event fires, so every row tested after
+        the first reload read as untagged — measured, with consent identical
+        either way. A new context gives the site the first-visit state again.
+        """
+        nonlocal context, page, cdp
+        if not first:
+            try:
+                await context.close()
+            except Exception:
+                pass
+            context = await browser.new_context(**ctx_args)
+        try:
+            context.on("request", on_pw_request)
+        except Exception:
+            pass
+        page = await context.new_page()
+        await stealth_obj.apply_stealth_async(page)
+        cdp = await context.new_cdp_session(page)
+        await cdp.send("Network.enable")
+        cdp.on("Network.requestWillBeSent", on_cdp_req)
+
+    await _new_session(first=True)
 
     for page_url in page_order:
         # Rows already validated by an earlier interrupted run stay as they are.
@@ -5056,18 +5075,24 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         sys.stdout.flush()
 
         async def _reset_page():
-            """Reload the page and rebuild the element list.
+            """Open the page again in a fresh session, and rebuild the list.
 
             Needed between candidate attempts for one SDR row. The first click
             can open a form, switch a tab or expand a panel, and the second
             candidate then gets clicked in a page state that never occurs for
             a real user — which is how the hero "Find a Provider" kept being
             reported for the row that means the promo one further down.
+
+            A new context, not a reload: this site binds its own click tags
+            only on a session's first page load, so everything tested after a
+            reload lost site_link and exit_link and read as untagged.
             """
             try:
+                await _new_session()
                 await _sdr_goto(page, page_url)
                 await _sdr_try_login(page, auth_user, auth_pass)
                 await asyncio.sleep(2.0)
+                await accept_cookies(page)
                 try:
                     await page.wait_for_load_state("networkidle", timeout=12000)
                 except Exception:
