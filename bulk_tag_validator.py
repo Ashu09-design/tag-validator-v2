@@ -1600,6 +1600,12 @@ FINAL_DRAIN_WAIT = 9.0
 SDR_MAX_CANDIDATES = 3
 SDR_MIN_BEACON_WAIT = 10.0
 SDR_BEACON_MAX_WAIT = 20.0
+
+# How long to keep listening when nothing has answered a click yet. Silence is
+# not proof that nothing is coming: natrellecares.com queues its click events
+# and flushes them in a batch, and the ISI phone link's exit_link was measured
+# arriving 5.8s after the click while another link's arrived in 0.8s.
+SDR_QUEUED_BEACON_WAIT = 9.0
 # How long to let a page settle before touching it.
 SDR_PAGE_SETTLE = 4.0
 
@@ -5525,6 +5531,45 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 except Exception:
                     early = []
                 expect = bool(early)
+
+                # Has the property under test answered THIS click yet? The
+                # row's own event ends the wait, and so does any hit carrying
+                # this element's link identity — the site has answered, only
+                # with a different event name, and nothing more is coming.
+                want_event = _norm_str(case["expected_event"])
+                want_text = _norm_str(best.get("text") or "")
+                want_href = best.get("href") or ""
+
+                def _is_this_click(ev):
+                    """Does this hit carry the clicked element's own identity?
+
+                    A site that queues its events flushes other controls'
+                    clicks into the same batch, so arriving inside the window
+                    proves nothing on its own.
+                    """
+                    prm = ev.get("params") or {}
+                    lt = _norm_str(prm.get("link_text", ""))
+                    if lt and want_text and lt == want_text:
+                        return True
+                    lu = str(prm.get("link_url", "") or "")
+                    return bool(lu and want_href
+                                and (_url_keys(lu, page_url) & _url_keys(want_href, page_url)))
+
+                def _click_answered():
+                    for r in all_requests[bookmark:]:
+                        if '/g/collect' not in r["url"]:
+                            continue
+                        for ev in parse_ga4_event(r["url"], r["post"]):
+                            # A second property answering is not this one
+                            # answering: judge only the property under test,
+                            # or the window shuts in the gap between the two.
+                            if (ga4_id and ga4_mode != "any"
+                                    and ev.get("measurement_id") != ga4_id):
+                                continue
+                            if _norm_str(ev.get("event")) == want_event or _is_this_click(ev):
+                                return True
+                    return False
+
                 # A site that tags to two GA4 properties does not always send both
                 # hits together — one can arrive seconds after the other. A pure
                 # "quiet for 1.2s" rule closes the window in the gap between them
@@ -5532,19 +5577,28 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 # not answered yet. So when an event is expected, hold the window
                 # open for a minimum period regardless of quiet, and only let the
                 # quiet detector extend past that.
+                #
+                # Quiet is no proof that nothing is coming, either. A site that
+                # queues its click events and flushes them in a batch answers
+                # seconds later with the line silent in between, so while this
+                # click is unanswered the window stays open to the queued-beacon
+                # cap instead of closing on silence.
                 started = time.time()
                 min_wait = SDR_MIN_BEACON_WAIT if expect else 0.8
-                deadline = started + (SDR_BEACON_MAX_WAIT if expect else CLICK_IDLE_WAIT)
+                deadline = started + (SDR_BEACON_MAX_WAIT if expect
+                                      else SDR_QUEUED_BEACON_WAIT)
                 last_n, last_change = len(all_requests), time.time()
                 quiet = 2.0 if expect else 0.8
                 while time.time() < deadline:
                     await asyncio.sleep(0.25)
+                    if _click_answered():
+                        break
                     if len(all_requests) != last_n:
                         last_n, last_change = len(all_requests), time.time()
                         continue
                     if time.time() - started < min_wait:
                         continue
-                    if time.time() - last_change >= quiet:
+                    if expect and time.time() - last_change >= quiet:
                         break
                 current_cid["v"] = -1
 
@@ -5617,6 +5671,12 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
 
                 expected_event = case["expected_event"]
                 cands = [e for e in scoped if _norm_str(e.get("event")) == _norm_str(expected_event)]
+                # A queued batch can carry another control's click into this
+                # window. When any candidate carries this element's own link
+                # identity, the rest belong to something else.
+                own = [e for e in cands if _is_this_click(e)]
+                if own:
+                    cands = own
 
                 reasons, param_diff, notes = [], [], []
                 matched = None
@@ -5714,7 +5774,10 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                 # click event is dual tagging, not a duplicate.
                 dup_by_prop = {}
                 for e in scoped:
-                    if _sdr_is_click_event(e.get("event")):
+                    # Only this element's own hits count. The same batch often
+                    # carries clicks made earlier on other controls, and
+                    # counting those failed a row for someone else's doing.
+                    if _sdr_is_click_event(e.get("event")) and _is_this_click(e):
                         dup_by_prop.setdefault(e.get("measurement_id", ""), []).append(
                             e.get("event", ""))
                 for prop, names in sorted(dup_by_prop.items()):
@@ -5970,9 +6033,14 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     expect = False
                 started = time.time()
                 min_wait = SDR_MIN_BEACON_WAIT if expect else 0.8
-                deadline = started + (SDR_BEACON_MAX_WAIT if expect else CLICK_IDLE_WAIT)
+                deadline = started + (SDR_BEACON_MAX_WAIT if expect
+                                      else SDR_QUEUED_BEACON_WAIT)
                 last_n, last_change = len(all_requests), time.time()
                 quiet = 2.0 if expect else 0.8
+
+                def _ga4_since_click():
+                    return any('/g/collect' in r["url"] for r in all_requests[bookmark:])
+
                 while time.time() < deadline:
                     await asyncio.sleep(0.25)
                     if len(all_requests) != last_n:
@@ -5980,7 +6048,9 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                         continue
                     if time.time() - started < min_wait:
                         continue
-                    if time.time() - last_change >= quiet:
+                    # Silence after something arrived means it is over; silence
+                    # with nothing yet may just be a queued batch still to come.
+                    if (expect or _ga4_since_click()) and time.time() - last_change >= quiet:
                         break
 
                 def _collect():
