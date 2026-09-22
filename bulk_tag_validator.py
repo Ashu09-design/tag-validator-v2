@@ -3922,6 +3922,17 @@ def _sdr_page_url(value):
     return 'https://' + s if _SDR_HOSTLIKE.match(s) else ''
 
 
+# Events that are the click reporting itself: site_link, exit_link,
+# download_link, link_click. One click should report itself once per GA4
+# property. Anything that merely rides along with a click — click, compliance,
+# page_view — is not a click report and is expected to fire beside it.
+_SDR_CLICK_EVENT_RE = re.compile(r'(?:^|_)link(?:_click)?$')
+
+
+def _sdr_is_click_event(name):
+    return bool(_SDR_CLICK_EVENT_RE.search(_norm_str(name).replace(' ', '_')))
+
+
 def _sdr_norm_header(h):
     """A header reduced to comparable words.
 
@@ -5694,6 +5705,29 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                                 reasons.append(
                                     f"{pname}: expected '{pexp}' but got "
                                     f"'{_sdr_show(pact)}'{note}")
+
+                # Two click reports on one property means the click is counted
+                # twice — two exit_links, or a site_link and an exit_link
+                # together. It fails the row even when the expected event
+                # itself matched, because the extra hit is a real defect in
+                # what GA4 records. A second property receiving its own single
+                # click event is dual tagging, not a duplicate.
+                dup_by_prop = {}
+                for e in scoped:
+                    if _sdr_is_click_event(e.get("event")):
+                        dup_by_prop.setdefault(e.get("measurement_id", ""), []).append(
+                            e.get("event", ""))
+                for prop, names in sorted(dup_by_prop.items()):
+                    if len(names) < 2:
+                        continue
+                    counted = {}
+                    for n in names:
+                        counted[n] = counted.get(n, 0) + 1
+                    desc = ", ".join(f"{n} ×{c}" if c > 1 else n
+                                     for n, c in sorted(counted.items()))
+                    reasons.append(
+                        f"Click counted twice on {prop or 'the same GA4 property'}: "
+                        f"{desc} fired on this one click — only one should")
 
                 status = "PASS" if not reasons else "FAIL"
                 if status == "PASS" and not verified:
