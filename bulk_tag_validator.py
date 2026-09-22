@@ -1240,6 +1240,68 @@ EXPOSE_HIDDEN_JS = r"""
 # browser-default navigation; the analytics click listeners (Adobe s.tl, GA4
 # gtag, GTM dataLayer pushes) still run as normal because they fire in the
 # same event tick.
+# A carousel shows one slide at a time and only that slide can be clicked.
+# An SDR names the card, not the slide number — "meet the artisan - Baggu Bag"
+# — and clicking that card's button where it sits lands on whichever card is
+# currently showing. Every such row was being judged against the first card's
+# beacon. Advance the carousel until the row's own card is the one on screen.
+CAROUSEL_REVEAL_JS = r"""
+async (el) => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const reachable = () => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) return false;
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
+        const top = document.elementFromPoint(x, y);
+        return !!top && (top === el || el.contains(top) || top.contains(el));
+    };
+    try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+    await sleep(200);
+    if (reachable()) return {ok: true, tries: 0};
+
+    // Every carousel-ish or horizontally scrollable ancestor, innermost first.
+    // The card itself is often named "…carousel-slide-card", so closest() on
+    // the class alone stops at the card and never finds the strip's controls.
+    const chain = [];
+    for (let n = el.parentElement, i = 0; n && i < 12; n = n.parentElement, i++) {
+        const cls = (n.className || '').toString().toLowerCase();
+        if (/carousel|slider|swiper|slick|glide/.test(cls)
+                || n.scrollWidth > n.clientWidth + 20) {
+            chain.push(n);
+        }
+    }
+    if (!chain.length) return {ok: false, tries: 0, why: 'not inside a carousel'};
+
+    // Some strips are plain overflow: move the scroll rather than press a button.
+    for (const box of chain) {
+        if (box.scrollWidth > box.clientWidth + 20) {
+            const br = box.getBoundingClientRect(), er = el.getBoundingClientRect();
+            box.scrollLeft += (er.left + er.width / 2) - (br.left + br.width / 2);
+            await sleep(400);
+            if (reachable()) return {ok: true, tries: 0, how: 'scrolled the strip'};
+        }
+    }
+
+    const NEXT = '[class*="next"],[aria-label*="next" i],[title*="next" i],'
+               + '[class*="arrow-right"],[class*="chevron-right"],'
+               + '.swiper-button-next,.slick-next';
+    for (let ci = chain.length - 1; ci >= 0; ci--) {      // outermost strip first
+        for (let i = 1; i <= 8; i++) {
+            const next = chain[ci].querySelector(NEXT);
+            if (!next) break;
+            try { next.click(); } catch (e) { break; }
+            await sleep(500);
+            try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+            await sleep(150);
+            if (reachable()) return {ok: true, tries: i, how: 'advanced the carousel'};
+        }
+    }
+    return {ok: false, tries: 0, why: 'could not bring the card into view'};
+}
+"""
+
+
 BLOCK_NAVIGATION_JS = r"""
 (() => {
     if (window.__navBlockerInstalled) return true;
@@ -4648,6 +4710,26 @@ def _sdr_score_element(case, el, base_url=""):
                 if dt and ct and len(dt & ct) / len(dt) >= 0.6:
                     score += 4
 
+    # A row often names more than the control's own label: "meet the artisan -
+    # AnaOno Intimates" for a button that reads only "Meet the artisan". The
+    # remainder names the card it sits in, and every card in a carousel
+    # carries the same button — so without this the row lands on whichever
+    # card happened to sort first and is judged against another artisan's
+    # beacon. The Location column would say which card, but on these sheets it
+    # says only "Body".
+    leftover = _tokens(case.get('button_name') or '')
+    for lbl in el_label_list:
+        leftover -= _tokens(lbl)
+    ctx_tokens = _tokens(el.get('context') or '')
+    if leftover and ctx_tokens:
+        hit = len(leftover & ctx_tokens) / len(leftover)
+        if hit >= 0.8:
+            score += 7
+        elif hit >= 0.5:
+            score += 4
+        elif not (leftover & ctx_tokens):
+            score -= 5     # this control belongs to a card the row never names
+
     loc = (case.get('location') or '').lower()
     if loc:
         if 'header' in loc or 'menu' in loc or 'nav' in loc:
@@ -4656,6 +4738,19 @@ def _sdr_score_element(case, el, base_url=""):
             score += 3 if zone == 'footer' else -1
         elif 'body' in loc or 'hero' in loc or 'content' in loc:
             score += 2 if zone == 'body' else 0
+
+    # A row expecting exit_link is about a link that leaves the site, and a
+    # site_link row is about one that does not. The same label often appears
+    # twice — the footer's "Privacy Notice" goes to abbvie.com while the
+    # consent banner's opens a panel on this site — and the destination is the
+    # only thing that tells those two apart.
+    want_ev = _norm_str(case.get('expected_event'))
+    if el_href.startswith('http') and base_url:
+        leaves = _host_of(el_href) != _host_of(base_url)
+        if 'exit' in want_ev:
+            score += 3 if leaves else -3
+        elif 'site_link' in want_ev:
+            score += 2 if not leaves else -2
 
     ctype = (case.get('click_type') or '').lower()
     if 'download' in ctype and el.get('is_download'):
@@ -5140,6 +5235,12 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
         # afterwards can tell specified from unspecified.
         tested_keys = set()
 
+        # Set when a row leaves the page in another state — a row that names a
+        # toggle collapses the panel it tested. Revealing again is itself a
+        # burst of tracked clicks on some sites, so it is done when something
+        # actually changed rather than before every row.
+        state_dirty = False
+
         for ci, case in enumerate(page_cases):
             label = (case.get("button_name") or case.get("link_text") or "")[:34]
 
@@ -5182,6 +5283,18 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             # does a URL-only match get to win.
             # Match against the page as it is NOW, not as it was before the
             # previous row's click re-rendered it.
+            # The row before may have left the page in another state: a row
+            # that names a toggle collapses the panel it just tested, and
+            # everything inside that panel then stops existing for the rows
+            # that follow — which is how the ISI phone number went missing and
+            # its row landed on the footer's phone number instead.
+            if state_dirty:
+                try:
+                    await page.evaluate(EXPOSE_HIDDEN_JS)
+                    await asyncio.sleep(0.6)
+                except Exception:
+                    pass
+                state_dirty = False
             fresh = await _fresh_elements()
             elements = fresh or base_elements
 
@@ -5257,6 +5370,10 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
             # toggle back into the state the row names and look again.
             toggled = False
             _want_state, _other_state = _sdr_toggle_state(case.get("button_name") or "")
+            if _want_state:
+                # Testing a toggle means clicking it, which leaves the panel in
+                # the other state for whatever row comes next.
+                state_dirty = True
             if (_want_state
                     and not any(_want_state in _norm_str(e.get("text")) for e in elements)):
                 _flip = next((e for e in elements
@@ -5290,6 +5407,7 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                                     break
                             await asyncio.sleep(1.0)
                             toggled = True
+                            state_dirty = True
                             elements = await _fresh_elements()
                             scored_now = _score_all(elements)
                             best, best_score = _pick_best(scored_now)
@@ -5395,6 +5513,21 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                         await asyncio.sleep(0.6)
                 except Exception:
                     pass
+
+                # Only a carousel's current slide can be clicked. The row names
+                # a card — "meet the artisan - Baggu Bag" — that may be several
+                # slides along, and clicking it where it sits lands on whatever
+                # card is showing instead.
+                try:
+                    _rev = await loc_el.evaluate(CAROUSEL_REVEAL_JS)
+                    if _rev and _rev.get("tries"):
+                        sys.stdout.write(
+                            "[SDR]   advanced the carousel %d slide(s) to reach this row's card\n"
+                            % _rev["tries"])
+                        sys.stdout.flush()
+                except Exception:
+                    pass
+
                 # Clear any consent panel before EVERY click, not only when a
                 # hit-test has already failed. OneTrust's preference centre
                 # lays a full-page dark filter over everything, and Playwright
@@ -5745,12 +5878,16 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
 
                 # --- collect what actually fired ---
                 net_events = []
-                for req in window_reqs:
+                for _ri, req in enumerate(window_reqs):
                     ul = req["url"].lower()
                     if "/g/collect" in ul or (("google-analytics.com" in ul
                                                or "analytics.google.com" in ul) and "collect" in ul):
                         for ev in parse_ga4_event(req["url"], req["post"]):
                             if ev.get("event") and not _is_noise_event(ev["event"]):
+                                # Which hit carried it. Two tags firing for one
+                                # click travel in the same hit; two separate
+                                # clicks never do.
+                                ev["_hit"] = _ri
                                 net_events.append(ev)
                                 if ev.get("measurement_id"):
                                     detected_ids.add(ev["measurement_id"])
@@ -5816,6 +5953,23 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                             cosmetic = True
                             notes.append(f"{pname}: SDR says '{pexp}', site sends "
                                          f"'{_sdr_show(pact)}' (spacing/punctuation only)")
+
+                        if not ok and pexp and (pact is None or str(pact) == ""):
+                            # The value IS on the hit, under a different name.
+                            # The sheet names the wrong column; the tagging is
+                            # right. The team reads it the same way — "link
+                            # location needs to be updated instead of file
+                            # location" — and passes the row.
+                            same = sorted({k.split('.')[-1] for k, v in actual_params.items()
+                                           if _norm_str(v) == _norm_str(pexp)
+                                           and k.split('.')[-1] != pname})
+                            if same:
+                                ok = True
+                                cosmetic = True
+                                notes.append(
+                                    f"{pname}: the hit carries '{pexp}' as "
+                                    f"{', '.join(same)} instead — the value is right, "
+                                    f"the SDR names the wrong parameter")
 
                         param_diff.append({"param": pname, "expected": pexp,
                                            "actual": "" if pact is None else str(pact),
@@ -5888,9 +6042,11 @@ async def validate_sdr(browser, sdr_path, start_url, sheet_name=None,
                     # carries clicks made earlier on other controls, and
                     # counting those failed a row for someone else's doing.
                     if _sdr_is_click_event(e.get("event")) and _is_this_click(e):
-                        dup_by_prop.setdefault(e.get("measurement_id", ""), []).append(
+                        dup_by_prop.setdefault(
+                            (e.get("measurement_id", ""), e.get("_hit")), []).append(
                             e.get("event", ""))
-                for prop, names in sorted(dup_by_prop.items()):
+                for (prop, _h), names in sorted(dup_by_prop.items(),
+                                                key=lambda kv: (str(kv[0][0]), kv[0][1] or 0)):
                     if len(names) < 2:
                         continue
                     counted = {}
